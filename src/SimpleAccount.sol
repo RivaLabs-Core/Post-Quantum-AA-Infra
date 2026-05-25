@@ -8,7 +8,7 @@ import {TokenCallbackHandler} from "account-abstraction/accounts/callback/TokenC
 import {PackedUserOperation} from "account-abstraction/interfaces/PackedUserOperation.sol";
 import {IEntryPoint} from "account-abstraction/interfaces/IEntryPoint.sol";
 import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
-import {MerkleProof} from "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
+import {MerkleProofLib} from "solady/utils/MerkleProofLib.sol";
 import {InitialSignerCommitment} from "./InitialSignerCommitment.sol";
 import {ISignatureVerifier} from "./Interfaces/ISignatureVerifier.sol";
 import {FORS_SIG_LEN} from "./Verifiers/ForsVerifier.sol";
@@ -119,7 +119,7 @@ contract SimpleAccount is BaseAccount, TokenCallbackHandler, Initializable {
         }
 
         bytes32 leaf = InitialSignerCommitment.initialSignerLeaf(block.chainid, recovered);
-        if (!MerkleProof.verify(proof, initialSignerRoot, leaf)) {
+        if (!MerkleProofLib.verify(proof, initialSignerRoot, leaf)) {
             return SIG_VALIDATION_FAILED;
         }
 

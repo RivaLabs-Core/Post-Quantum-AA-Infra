@@ -626,8 +626,8 @@ leaf = keccak256(abi.encode(
 ))
 ```
 
-The tree uses sorted-pair Keccak hashing, matching OpenZeppelin
-`MerkleProof.verify`.
+The tree uses sorted-pair Keccak hashing, verified onchain with Solady
+`MerkleProofLib.verify`.
 
 Activation procedure:
 

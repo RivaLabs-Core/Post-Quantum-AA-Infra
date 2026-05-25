@@ -78,8 +78,8 @@ leaf = keccak256(abi.encode(
 ))
 ```
 
-The Merkle tree uses sorted-pair Keccak hashing, matching OpenZeppelin
-`MerkleProof`:
+The Merkle tree uses sorted-pair Keccak hashing, verified onchain with Solady
+`MerkleProofLib`:
 
 ```text
 parent = keccak256(min(a, b) || max(a, b))
