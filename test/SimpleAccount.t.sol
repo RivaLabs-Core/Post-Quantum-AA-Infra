@@ -27,6 +27,8 @@ contract SimpleAccountTest is Test {
     bytes32 internal constant INITIAL_SIGNER_LEAF_TYPEHASH =
         keccak256("NiceTryInitialSignerLeaf:v1(uint256 chainId,address signer)");
     uint8 internal constant ACTIVATION_SIGNATURE_VERSION = 1;
+    uint256 internal constant ACTIVATION_TREE_LEAF_COUNT = 256;
+    uint256 internal constant ACTIVATION_TREE_DEPTH = 8;
 
     SimpleAccountFactory factory;
     SimpleAccount account;
@@ -34,7 +36,6 @@ contract SimpleAccountTest is Test {
     IEntryPoint entryPoint;
 
     address initialOwner = makeAddr("initialForsOwner");
-    address remoteInitialOwner = makeAddr("remoteInitialForsOwner");
     address owner0 = makeAddr("forsOwner0");
     address owner1 = makeAddr("forsOwner1");
     address owner2 = makeAddr("forsOwner2");
@@ -42,8 +43,8 @@ contract SimpleAccountTest is Test {
     address recipient = makeAddr("recipient");
 
     bytes32 initialLeaf;
-    bytes32 remoteLeaf;
     bytes32 initialSignerRoot;
+    bytes32[] activationProof;
 
     address constant ENTRYPOINT = 0x0000000071727De22E5E9d8BAf0edAc6f37da032;
 
@@ -52,8 +53,7 @@ contract SimpleAccountTest is Test {
         vm.etch(ENTRYPOINT, hex"00");
 
         initialLeaf = _leaf(block.chainid, initialOwner);
-        remoteLeaf = _leaf(block.chainid + 1, remoteInitialOwner);
-        initialSignerRoot = _hashPair(initialLeaf, remoteLeaf);
+        (initialSignerRoot, activationProof) = _buildActivationTree();
 
         verifier = new MockSignatureVerifier();
         factory = new SimpleAccountFactory(entryPoint, verifier);
@@ -391,8 +391,10 @@ contract SimpleAccountTest is Test {
     }
 
     function _proof() internal view returns (bytes32[] memory proof) {
-        proof = new bytes32[](1);
-        proof[0] = remoteLeaf;
+        proof = new bytes32[](activationProof.length);
+        for (uint256 i = 0; i < activationProof.length; i++) {
+            proof[i] = activationProof[i];
+        }
     }
 
     function _activationBlob(bytes memory forsSig, bytes32[] memory proof) internal pure returns (bytes memory) {
@@ -406,6 +408,35 @@ contract SimpleAccountTest is Test {
 
     function _leaf(uint256 chainId, address signer) internal pure returns (bytes32) {
         return keccak256(abi.encode(INITIAL_SIGNER_LEAF_TYPEHASH, chainId, signer));
+    }
+
+    function _buildActivationTree() internal view returns (bytes32 root, bytes32[] memory proof) {
+        bytes32[] memory level = new bytes32[](ACTIVATION_TREE_LEAF_COUNT);
+        level[0] = initialLeaf;
+
+        for (uint256 i = 1; i < ACTIVATION_TREE_LEAF_COUNT; i++) {
+            address signer = address(uint160(uint256(keccak256(abi.encode("remoteInitialOwner", i)))));
+            level[i] = _leaf(block.chainid + i, signer);
+        }
+
+        proof = new bytes32[](ACTIVATION_TREE_DEPTH);
+        uint256 index = 0;
+        uint256 width = ACTIVATION_TREE_LEAF_COUNT;
+
+        for (uint256 depth = 0; depth < ACTIVATION_TREE_DEPTH; depth++) {
+            proof[depth] = level[index ^ 1];
+
+            bytes32[] memory nextLevel = new bytes32[](width / 2);
+            for (uint256 i = 0; i < width; i += 2) {
+                nextLevel[i / 2] = _hashPair(level[i], level[i + 1]);
+            }
+
+            level = nextLevel;
+            index /= 2;
+            width /= 2;
+        }
+
+        root = level[0];
     }
 
     function _hashPair(bytes32 a, bytes32 b) internal pure returns (bytes32) {
