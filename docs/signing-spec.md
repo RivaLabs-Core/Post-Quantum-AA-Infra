@@ -611,24 +611,18 @@ activation signature layout is:
 ```text
 offset  length  field
 0       1       activationVersion = 1
-1       1       schemeId = 1 for FORS+C
-2       8       signerIndex = uint64_be(0)
-10      32      derivationPathHash
-42      2       proofLen = uint16_be(number of proof siblings)
-44      32*N    Merkle proof siblings
-44+32N  2448    FORS signature over EntryPoint.getUserOpHash(userOp)
+1       2       proofLen = uint16_be(number of proof siblings)
+3       32*N    Merkle proof siblings
+3+32N   2448    FORS signature over EntryPoint.getUserOpHash(userOp)
 ```
 
 The activation Merkle leaf is:
 
 ```text
 leaf = keccak256(abi.encode(
-    keccak256("NiceTryInitialSignerLeaf:v1(uint256 chainId,address signer,bytes32 derivationPathHash,uint8 schemeId,uint64 signerIndex)"),
+    keccak256("NiceTryInitialSignerLeaf:v1(uint256 chainId,address signer)"),
     chainId,
-    initialSignerAddress,
-    derivationPathHash,
-    1,
-    0
+    initialSignerAddress
 ))
 ```
 
@@ -647,7 +641,8 @@ digest   = EntryPoint.getUserOpHash(userOp)
 
 forsSig = FORS_sign(S_0, digest)
 userOp.signature =
-    activationHeader ||
+    activationVersion ||
+    proofLen ||
     merkleProof ||
     forsSig
 

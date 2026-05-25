@@ -16,12 +16,12 @@ import {FORS_SIG_LEN} from "./Verifiers/ForsVerifier.sol";
 /// @title SimpleAccount
 /// @notice ERC-4337 smart account using standalone FORS as the primary signer.
 ///
-///         activation signature = [activation header][Merkle proof][FORS_SIG_LEN bytes FORS blob]
+///         activation signature = [activation version][Merkle proof][FORS_SIG_LEN bytes FORS blob]
 ///         normal signature     = [FORS_SIG_LEN bytes FORS blob]
 ///         userOp.callData  = [... any call ...][20 bytes nextOwner]
 contract SimpleAccount is BaseAccount, TokenCallbackHandler, Initializable {
-    // version(1) + scheme(1) + signerIndex(8) + derivationPathHash(32) + proofLen(2)
-    uint256 private constant ACTIVATION_HEADER_LENGTH = 44;
+    // version(1) + proofLen(2)
+    uint256 private constant ACTIVATION_HEADER_LENGTH = 3;
     uint256 private constant MAX_ACTIVATION_PROOF_LENGTH = 64;
 
     address public owner;
@@ -93,16 +93,9 @@ contract SimpleAccount is BaseAccount, TokenCallbackHandler, Initializable {
         }
 
         uint8 version = uint8(bytes1(signature[0]));
-        uint8 schemeId = uint8(bytes1(signature[1]));
-        uint64 signerIndex = uint64(bytes8(signature[2:10]));
-        bytes32 derivationPathHash = bytes32(signature[10:42]);
-        uint16 proofLen = uint16(bytes2(signature[42:44]));
+        uint16 proofLen = uint16(bytes2(signature[1:3]));
 
-        if (
-            version != InitialSignerCommitment.ACTIVATION_SIGNATURE_VERSION
-                || schemeId != InitialSignerCommitment.SCHEME_FORS
-                || signerIndex != InitialSignerCommitment.INITIAL_SIGNER_INDEX || proofLen > MAX_ACTIVATION_PROOF_LENGTH
-        ) {
+        if (version != InitialSignerCommitment.ACTIVATION_SIGNATURE_VERSION || proofLen > MAX_ACTIVATION_PROOF_LENGTH) {
             return SIG_VALIDATION_FAILED;
         }
 
@@ -125,9 +118,7 @@ contract SimpleAccount is BaseAccount, TokenCallbackHandler, Initializable {
             return SIG_VALIDATION_FAILED;
         }
 
-        bytes32 leaf = InitialSignerCommitment.initialSignerLeaf(
-            block.chainid, recovered, derivationPathHash, schemeId, signerIndex
-        );
+        bytes32 leaf = InitialSignerCommitment.initialSignerLeaf(block.chainid, recovered);
         if (!MerkleProof.verify(proof, initialSignerRoot, leaf)) {
             return SIG_VALIDATION_FAILED;
         }

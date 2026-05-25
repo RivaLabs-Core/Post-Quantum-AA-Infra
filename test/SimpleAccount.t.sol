@@ -24,12 +24,9 @@ contract MockSignatureVerifier is ISignatureVerifier {
 }
 
 contract SimpleAccountTest is Test {
-    bytes32 internal constant INITIAL_SIGNER_LEAF_TYPEHASH = keccak256(
-        "NiceTryInitialSignerLeaf:v1(uint256 chainId,address signer,bytes32 derivationPathHash,uint8 schemeId,uint64 signerIndex)"
-    );
+    bytes32 internal constant INITIAL_SIGNER_LEAF_TYPEHASH =
+        keccak256("NiceTryInitialSignerLeaf:v1(uint256 chainId,address signer)");
     uint8 internal constant ACTIVATION_SIGNATURE_VERSION = 1;
-    uint8 internal constant SCHEME_FORS = 1;
-    uint64 internal constant INITIAL_SIGNER_INDEX = 0;
 
     SimpleAccountFactory factory;
     SimpleAccount account;
@@ -44,8 +41,6 @@ contract SimpleAccountTest is Test {
 
     address recipient = makeAddr("recipient");
 
-    bytes32 derivationPathHash;
-    bytes32 remoteDerivationPathHash;
     bytes32 initialLeaf;
     bytes32 remoteLeaf;
     bytes32 initialSignerRoot;
@@ -56,10 +51,8 @@ contract SimpleAccountTest is Test {
         entryPoint = IEntryPoint(ENTRYPOINT);
         vm.etch(ENTRYPOINT, hex"00");
 
-        derivationPathHash = keccak256("NiceTry/test/local-path");
-        remoteDerivationPathHash = keccak256("NiceTry/test/remote-path");
-        initialLeaf = _leaf(block.chainid, initialOwner, derivationPathHash);
-        remoteLeaf = _leaf(block.chainid + 1, remoteInitialOwner, remoteDerivationPathHash);
+        initialLeaf = _leaf(block.chainid, initialOwner);
+        remoteLeaf = _leaf(block.chainid + 1, remoteInitialOwner);
         initialSignerRoot = _hashPair(initialLeaf, remoteLeaf);
 
         verifier = new MockSignatureVerifier();
@@ -104,7 +97,7 @@ contract SimpleAccountTest is Test {
     }
 
     function test_factoryDifferentRootGivesDifferentAddress() public {
-        bytes32 otherRoot = _leaf(block.chainid, makeAddr("otherInitialOwner"), derivationPathHash);
+        bytes32 otherRoot = _leaf(block.chainid, makeAddr("otherInitialOwner"));
         address addr0 = factory.getAddress(initialSignerRoot, 0);
         address addr1 = factory.getAddress(otherRoot, 0);
         assertTrue(addr0 != addr1);
@@ -136,21 +129,8 @@ contract SimpleAccountTest is Test {
         verifier.setRecovered(initialOwner);
         bytes32[] memory proof = _proof();
         bytes memory callData = _execCalldata(recipient, 0, "", owner0);
-        bytes memory sig =
-            _activationBlob(_dummyBlob(), proof, keccak256("wrong-path"), SCHEME_FORS, INITIAL_SIGNER_INDEX);
-        PackedUserOperation memory op = _userOp(callData, sig);
-
-        vm.prank(ENTRYPOINT);
-        uint256 r = account.validateUserOp(op, keccak256("activation"), 0);
-
-        assertEq(r, 1);
-        assertEq(account.owner(), address(0));
-    }
-
-    function test_activationWrongScheme_rejected() public {
-        verifier.setRecovered(initialOwner);
-        bytes memory callData = _execCalldata(recipient, 0, "", owner0);
-        bytes memory sig = _activationBlob(_dummyBlob(), _proof(), derivationPathHash, 2, INITIAL_SIGNER_INDEX);
+        proof[0] = keccak256("wrong-proof");
+        bytes memory sig = _activationBlob(_dummyBlob(), proof);
         PackedUserOperation memory op = _userOp(callData, sig);
 
         vm.prank(ENTRYPOINT);
@@ -415,33 +395,17 @@ contract SimpleAccountTest is Test {
         proof[0] = remoteLeaf;
     }
 
-    function _activationBlob(bytes memory forsSig, bytes32[] memory proof) internal view returns (bytes memory) {
-        return _activationBlob(forsSig, proof, derivationPathHash, SCHEME_FORS, INITIAL_SIGNER_INDEX);
-    }
-
-    function _activationBlob(
-        bytes memory forsSig,
-        bytes32[] memory proof,
-        bytes32 pathHash,
-        uint8 schemeId,
-        uint64 signerIndex
-    ) internal pure returns (bytes memory blob) {
+    function _activationBlob(bytes memory forsSig, bytes32[] memory proof) internal pure returns (bytes memory) {
         require(proof.length <= type(uint16).max, "proof too long");
-        blob = abi.encodePacked(
-            bytes1(ACTIVATION_SIGNATURE_VERSION),
-            bytes1(schemeId),
-            bytes8(signerIndex),
-            pathHash,
-            bytes2(uint16(proof.length))
-        );
+        bytes memory blob = abi.encodePacked(bytes1(ACTIVATION_SIGNATURE_VERSION), bytes2(uint16(proof.length)));
         for (uint256 i = 0; i < proof.length; i++) {
             blob = bytes.concat(blob, proof[i]);
         }
         return bytes.concat(blob, forsSig);
     }
 
-    function _leaf(uint256 chainId, address signer, bytes32 pathHash) internal pure returns (bytes32) {
-        return keccak256(abi.encode(INITIAL_SIGNER_LEAF_TYPEHASH, chainId, signer, pathHash, SCHEME_FORS, uint64(0)));
+    function _leaf(uint256 chainId, address signer) internal pure returns (bytes32) {
+        return keccak256(abi.encode(INITIAL_SIGNER_LEAF_TYPEHASH, chainId, signer));
     }
 
     function _hashPair(bytes32 a, bytes32 b) internal pure returns (bytes32) {

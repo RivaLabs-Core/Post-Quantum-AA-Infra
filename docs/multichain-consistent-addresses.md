@@ -63,29 +63,19 @@ If any of those drift, the address can drift.
 
 The root commits to the first signer for each supported chain.
 
-Each leaf is:
+Each leaf is intentionally minimal:
 
 ```text
 INITIAL_SIGNER_LEAF_TYPEHASH =
   keccak256(
-    "NiceTryInitialSignerLeaf:v1(uint256 chainId,address signer,bytes32 derivationPathHash,uint8 schemeId,uint64 signerIndex)"
+    "NiceTryInitialSignerLeaf:v1(uint256 chainId,address signer)"
   )
 
 leaf = keccak256(abi.encode(
     INITIAL_SIGNER_LEAF_TYPEHASH,
     chainId,
-    signer,
-    derivationPathHash,
-    schemeId,
-    signerIndex
+    signer
 ))
-```
-
-Current constants:
-
-```text
-schemeId    = 1   // FORS+C
-signerIndex = 0   // initial signer only
 ```
 
 The Merkle tree uses sorted-pair Keccak hashing, matching OpenZeppelin
@@ -97,7 +87,8 @@ parent = keccak256(min(a, b) || max(a, b))
 
 The `chainId` is part of the leaf. During activation the contract reconstructs
 the leaf with `block.chainid`, so a proof for one chain cannot activate the same
-root on another chain.
+root on another chain. Derivation paths remain wallet-side metadata; onchain
+authorization only needs the current chain and the recovered initial signer.
 
 ## Account Lifecycle
 
@@ -138,12 +129,9 @@ and the normal FORS signature:
 ```text
 offset  length  field
 0       1       activationVersion = 1
-1       1       schemeId = 1 for FORS+C
-2       8       signerIndex, uint64 big-endian, currently 0
-10      32      derivationPathHash
-42      2       proofLen, uint16 big-endian
-44      32*N    Merkle proof siblings
-44+32N  2448    FORS signature blob
+1       2       proofLen, uint16 big-endian
+3       32*N    Merkle proof siblings
+3+32N   2448    FORS signature blob
 ```
 
 Validation flow:
@@ -152,13 +140,10 @@ Validation flow:
 1. Read nextOwner from the last 20 bytes of userOp.callData.
 2. Parse activation header.
 3. Require version == 1.
-4. Require schemeId == FORS+C.
-5. Require signerIndex == 0.
-6. Recover initial signer from the FORS blob over userOpHash.
-7. Rebuild leaf using block.chainid, recovered signer, derivationPathHash,
-   schemeId, signerIndex.
-8. Verify Merkle proof against initialSignerRoot.
-9. Rotate owner to nextOwner.
+4. Recover initial signer from the FORS blob over userOpHash.
+5. Rebuild leaf using block.chainid and the recovered signer.
+6. Verify Merkle proof against initialSignerRoot.
+7. Rotate owner to nextOwner.
 ```
 
 Malformed activation signatures return `SIG_VALIDATION_FAILED`. A zero
