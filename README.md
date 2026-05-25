@@ -108,8 +108,12 @@ forge test
 A deploy script lives at `script/Deploy.s.sol`. Running it deploys
 `ForsVerifier`, the FORS-only `SimpleAccountFactory`, and the single
 `SimpleAccount` implementation created by the factory constructor. The script
-targets the canonical ERC-4337 EntryPoint v0.7, which lives at the same address
-on mainnet, Sepolia, and other rollups.
+uses the standard CREATE2 deployer at
+`0x4e59b44847b379578588920cA78FbF26c0B4956C`, so the verifier and factory
+addresses are stable across chains when the same salts, bytecode, and
+constructor arguments are used. The script targets the canonical ERC-4337
+EntryPoint v0.7 by default, which lives at the same address on mainnet,
+Sepolia, and other rollups.
 
 ## Related Repos
 
