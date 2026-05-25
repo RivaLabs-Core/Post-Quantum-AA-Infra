@@ -33,6 +33,7 @@ deliberately abstract.
 src/
 +-- SimpleAccount.sol                    ERC-4337 FORS-backed account
 +-- SimpleAccountFactory.sol             FORS-only CREATE2 factory
++-- InitialSignerCommitment.sol          CREATE2 salt and activation leaf domains
 +-- FrameAccount.sol                      EIP-8141 frame account logic
 +-- frame/
 |   +-- FrameTransactionLib.sol           EIP-8141 constants
@@ -62,6 +63,7 @@ docs/
 +-- fors-parameters.md                  FORS+C parameter notes
 +-- fors-two-forest-cache.md            FORS+C cache/reuse notes
 +-- frame-rotation-validation.md        Frame rotation validation checks
++-- multichain-consistent-addresses.md  Root-based first activation
 +-- signing-spec.md                     Signing payload layout
 ```
 
@@ -94,7 +96,7 @@ forge build
 forge test
 ```
 
-215 tests across 15 suites. Coverage includes:
+221 tests across 15 suites. Coverage includes:
 
 - Round-trip cryptographic tests for the main FORS verifier.
 - Main account and frame-account tests.
