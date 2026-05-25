@@ -16,7 +16,8 @@ import {FORS_SIG_LEN} from "./Verifiers/ForsVerifier.sol";
 /// @title SimpleAccount
 /// @notice ERC-4337 smart account using standalone FORS as the primary signer.
 ///
-///         userOp.signature = [FORS_SIG_LEN bytes FORS blob]
+///         activation signature = [activation header][Merkle proof][FORS_SIG_LEN bytes FORS blob]
+///         normal signature     = [FORS_SIG_LEN bytes FORS blob]
 ///         userOp.callData  = [... any call ...][20 bytes nextOwner]
 contract SimpleAccount is BaseAccount, TokenCallbackHandler, Initializable {
     // version(1) + scheme(1) + signerIndex(8) + derivationPathHash(32) + proofLen(2)

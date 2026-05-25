@@ -96,7 +96,7 @@ forge build
 forge test
 ```
 
-221 tests across 15 suites. Coverage includes:
+222 tests across 15 suites. Coverage includes:
 
 - Round-trip cryptographic tests for the main FORS verifier.
 - Main account and frame-account tests.

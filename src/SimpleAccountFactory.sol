@@ -24,8 +24,6 @@ contract SimpleAccountFactory {
     }
 
     function createAccount(bytes32 initialSignerRoot, uint256 salt) external returns (address accountAddr) {
-        require(initialSignerRoot != bytes32(0), "SimpleAccountFactory: zero root");
-
         bytes32 fullSalt = _salt(initialSignerRoot, salt);
 
         address predicted = LibClone.predictDeterministicAddress(ACCOUNT_IMPL, fullSalt, address(this));
@@ -42,6 +40,7 @@ contract SimpleAccountFactory {
     }
 
     function _salt(bytes32 initialSignerRoot, uint256 salt) internal pure returns (bytes32) {
+        require(initialSignerRoot != bytes32(0), "SimpleAccountFactory: zero root");
         return InitialSignerCommitment.accountSalt(initialSignerRoot, salt);
     }
 }

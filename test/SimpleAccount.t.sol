@@ -92,6 +92,11 @@ contract SimpleAccountTest is Test {
         factory.createAccount(bytes32(0), 1);
     }
 
+    function test_factoryGetAddressRejectsZeroRoot() public {
+        vm.expectRevert("SimpleAccountFactory: zero root");
+        factory.getAddress(bytes32(0), 1);
+    }
+
     function test_factoryDifferentSaltGivesDifferentAddress() public view {
         address addr0 = factory.getAddress(initialSignerRoot, 0);
         address addr1 = factory.getAddress(initialSignerRoot, 1);
