@@ -1,186 +1,282 @@
 # Multi-Chain Consistent Addresses
 
-This note documents the account-address mechanism implemented by
-`SimpleAccountFactory` and `SimpleAccount`.
+This document explains the commitment mechanism used to give the same user the
+same smart account address on multiple chains, while still allowing each chain
+to use a different first signer.
 
-## Goal
+It is intentionally explanatory. The exact byte encodings and signature layout
+are documented separately in [signing-spec.md](signing-spec.md) and the
+implementation.
 
-The same user account should resolve to the same counterfactual address on every
-supported chain, while each chain can use a different first signer derived from
-a different wallet path.
+## The Problem
 
-The account address therefore cannot depend on the chain-local first signer.
-Instead, it depends on one commitment: a Merkle root over the supported chains'
-initial signers.
+The account is deployed with CREATE2, so its address is determined before the
+account exists onchain.
 
-## CREATE2 Preimage
+That is useful because the wallet can know the user's account address in
+advance. It is also dangerous if the CREATE2 inputs contain anything that is
+different from chain to chain.
 
-The account is an EIP-1167 clone deployed by `SimpleAccountFactory` with
-Solady's `cloneDeterministic`.
+The first signer cannot be part of the CREATE2 salt, because the wallet derives
+a different first signer on every chain. If the salt included the chain-local
+first signer, the user would get a different account address on every chain.
 
-The final address is:
+The goal is therefore:
 
 ```text
-address = last20(keccak256(
-    0xff ||
-    factory ||
-    fullSalt ||
-    keccak256(cloneInitCode(accountImplementation))
-))
+same user
+same account address
+different first signer per chain
 ```
 
-`fullSalt` is:
+## The Core Idea
+
+Instead of putting the first signer directly into the CREATE2 salt, the salt
+contains a commitment to all supported first signers.
+
+That commitment is a Merkle root.
+
+Each supported chain contributes one leaf:
 
 ```text
-ACCOUNT_SALT_TYPEHASH =
-  keccak256("NiceTryAccountSalt:v1(bytes32 initialSignerRoot,uint256 salt)")
-
-fullSalt = keccak256(abi.encode(
-    ACCOUNT_SALT_TYPEHASH,
-    initialSignerRoot,
-    salt
-))
+chain id + first signer for that chain
 ```
 
-The first signer is deliberately absent from the salt. Two chains with the same
-factory address, account implementation address, root, and user salt predict the
-same account address.
+The root is the same on every chain because it is built from the same full list
+of supported chains. The account address can therefore depend on the root
+without depending on any one chain's local signer.
 
-This also means uniform deployment is required:
+At activation time, the account verifies that the signer used on the current
+chain is one of the signers committed in the root.
+
+## What The Root Means
+
+The root means:
 
 ```text
+"This account may be activated by these chain-specific first signers,
+and only on their corresponding chains."
+```
+
+It does not mean:
+
+```text
+"Every chain uses the same first signer."
+```
+
+The leaf includes the chain id, so a signer committed for one chain cannot be
+used to activate the account on another chain.
+
+For example:
+
+```text
+Ethereum Sepolia    -> signer A
+Base Sepolia        -> signer B
+Arbitrum Sepolia    -> signer C
+OP Sepolia          -> signer D
+```
+
+All four leaves produce one root. That same root is used everywhere. But on
+each chain, only the leaf for that chain can pass activation.
+
+## Why This Keeps The Address Stable
+
+The account address depends on:
+
+```text
+factory address
+account implementation address
+initial signer root
+user salt
+```
+
+The address does not depend on the individual first signer.
+
+So if the deployment is uniform across chains, these inputs can be identical:
+
+```text
+same factory
+same account implementation
+same root
+same user salt
+```
+
+Then the predicted account address is identical on every supported chain.
+
+## Why Deployment Uniformity Matters
+
+The root is only one part of the address calculation.
+
+The factory and account implementation must also be the same across chains. If
+the factory address changes, the account address changes. If the implementation
+address changes, the account address changes.
+
+For this reason, the factory deployment itself must be deterministic across
+chains. The deploy script deploys the verifier and factory through CREATE2 so
+that the same bytecode, salts, and constructor arguments produce the same
+addresses on every target chain.
+
+The important invariant is:
+
+```text
+same verifier address
 same factory address
 same account implementation address
-same factory bytecode
-same implementation bytecode
-same EntryPoint and verifier assumptions
-same root and user salt
+same root
+same user salt
 ```
 
-If any of those drift, the address can drift.
-
-## Initial Signer Root
-
-The root commits to the first signer for each supported chain.
-
-Each leaf is intentionally minimal:
-
-```text
-INITIAL_SIGNER_LEAF_TYPEHASH =
-  keccak256(
-    "NiceTryInitialSignerLeaf:v1(uint256 chainId,address signer)"
-  )
-
-leaf = keccak256(abi.encode(
-    INITIAL_SIGNER_LEAF_TYPEHASH,
-    chainId,
-    signer
-))
-```
-
-The Merkle tree uses sorted-pair Keccak hashing, verified onchain with Solady
-`MerkleProofLib`:
-
-```text
-parent = keccak256(min(a, b) || max(a, b))
-```
-
-The `chainId` is part of the leaf. During activation the contract reconstructs
-the leaf with `block.chainid`, so a proof for one chain cannot activate the same
-root on another chain. Derivation paths remain wallet-side metadata; onchain
-authorization only needs the current chain and the recovered initial signer.
+If any of those values drift, the account address can drift.
 
 ## Account Lifecycle
 
-Deployment does not set an owner:
+The account starts inactive.
+
+When the factory deploys the account, it stores the root but does not set an
+owner:
 
 ```text
-factory.createAccount(initialSignerRoot, salt)
-  deploys clone at CREATE2 address
-  calls account.initialize(initialSignerRoot)
-
-account.owner             = address(0)
-account.initialSignerRoot = initialSignerRoot
+owner = address(0)
+initialSignerRoot = root
 ```
 
-`owner == address(0)` is the inactive state. Inactive accounts accept only the
-activation signature format.
+`owner = address(0)` is not a normal usable state. It means the account is
+waiting for its first valid activation.
 
-After activation:
+During activation, the user provides:
 
 ```text
-account.owner = nextOwner
+the first signature
+the Merkle proof for this chain's first signer
+the next owner to rotate into
 ```
 
-From that point onward, validation uses the existing normal FORS path:
+If the proof is valid and the signature recovers the expected chain-local first
+signer, the account rotates from:
 
 ```text
-userOp.signature = 2448-byte FORS signature
-recovered = VERIFIER.recover(userOp.signature, userOpHash)
-require recovered == owner
-owner = nextOwner from the calldata tail
+owner = address(0)
 ```
 
-## Activation Signature
-
-When `owner == address(0)`, `userOp.signature` is a fixed header, a Merkle proof,
-and the normal FORS signature:
+to:
 
 ```text
-offset  length  field
-0       1       activationVersion = 1
-1       2       proofLen, uint16 big-endian
-3       32*N    Merkle proof siblings
-3+32N   2448    FORS signature blob
+owner = next signer
 ```
 
-Validation flow:
+After that, the Merkle root is no longer used for normal transactions. Normal
+validation checks the current owner and rotates to the next owner after each
+successful operation.
+
+## Activation In Plain Terms
+
+The first UserOp says:
 
 ```text
-1. Read nextOwner from the last 20 bytes of userOp.callData.
-2. Parse activation header.
-3. Require version == 1.
-4. Recover initial signer from the FORS blob over userOpHash.
-5. Rebuild leaf using block.chainid and the recovered signer.
-6. Verify Merkle proof against initialSignerRoot.
-7. Rotate owner to nextOwner.
+"I am the first signer for this chain.
+Here is a proof that this signer was committed in the root.
+Here is the next signer the account should use after activation."
 ```
 
-Malformed activation signatures return `SIG_VALIDATION_FAILED`. A zero
-`nextOwner` reverts through the same rotation guard used by the normal path.
+The account checks:
 
-## First UserOp Deployment Race
+1. The account is still inactive.
+2. The signature recovers a nonzero signer.
+3. The current chain id plus the recovered signer form a leaf.
+4. The provided Merkle proof connects that leaf to the stored root.
+5. The requested next owner is valid.
 
-The first UserOp may still use standard ERC-4337 deployment:
+If all checks pass, the account activates and immediately rotates to the next
+owner.
+
+This is important because the first signer is consumed during activation. It is
+not kept as the long-term owner.
+
+## Why The Chain ID Is In The Leaf
+
+The chain id prevents cross-chain proof reuse.
+
+Without the chain id, the same signer proof could be replayed on another chain
+that shares the same root. With the chain id included, the account rebuilds the
+leaf using `block.chainid`, so the proof is only valid on the intended chain.
+
+This lets the wallet safely use different derivation paths on different chains.
+
+## Adding Or Removing Chains
+
+The root commits to the full supported-chain set.
+
+If a chain is added after the root is created, the root changes. If the root
+changes, the account address changes.
+
+Therefore, every chain that should share the same address must be included in
+the root before the account address is derived.
+
+This is the main planning constraint:
 
 ```text
-sender   = factory.getAddress(root, salt)
-initCode = factory || createAccount(root, salt)
-signature = activation signature
+future shared-address chains must be committed up front
 ```
 
-If someone predeploys the same root-only account before this UserOp lands, the
-UserOp can fail on EntryPoint versions that reject nonempty `initCode` for an
-already-deployed sender. That is not a takeover: the deployed account is still
-inactive and still has the expected root.
+If a chain was not committed up front, it can still be supported later, but it
+will belong to a different root and therefore a different account address.
 
-The retry flow is:
+## Deployment Race During The First UserOp
+
+The first UserOp may include account deployment data. That is the standard
+ERC-4337 flow.
+
+There is a minor race: someone else may deploy the account before the user's
+first UserOp lands.
+
+That does not give them control. The deployed account is still inactive and
+still contains the expected root.
+
+The practical consequence is that the original UserOp may fail if the EntryPoint
+rejects nonempty deployment data for an account that already exists. The wallet
+can recover by checking the already-deployed account and resubmitting activation
+without deployment data.
+
+Because the resubmitted UserOp has a different hash, it needs a fresh
+activation signature. The current design accepts this under the bounded FORS+C
+reuse policy for this specific deployment race.
+
+## What Must Be Checked Offchain
+
+Before relying on a predicted account address, the wallet or deployment tooling
+must verify:
 
 ```text
-1. Check sender.code.length > 0.
-2. Check account.initialSignerRoot() == expected root.
-3. Check account.owner() == address(0).
-4. Check account.ENTRY_POINT() and account.VERIFIER().
-5. Resubmit activation with initCode = "".
-6. Produce a fresh activation signature over the new userOpHash.
+factory address matches on every chain
+account implementation address matches on every chain
+verifier address matches on every chain
+EntryPoint address is the expected one
+initialSignerRoot is identical on every chain
+user salt is identical on every chain
 ```
 
-For FORS+C this is acceptable if the local reuse policy allows `q = 2` for this
-failure mode. A stricter wallet can avoid the second signature by predeploying
-the inactive account before asking the device for the activation signature.
+Before retrying activation after a predeployment race, the wallet must verify:
 
-## Future Chain Support
+```text
+account code exists
+account root equals the expected root
+owner is still address(0)
+EntryPoint is the expected EntryPoint
+verifier is the expected verifier
+```
 
-Adding a new chain changes the root unless that chain's first signer was already
-included. A changed root means a different account address. Chains that must
-share the same address later need to be committed in the root up front.
+If those checks pass, the wallet can treat the predeployed account as the
+correct inactive account and continue activation.
+
+## Summary
+
+The commitment mechanism separates account address identity from chain-local
+first signers.
+
+The account address depends on one shared root, not on any individual first
+signer. The root commits to the authorized first signer for each supported
+chain. During activation, the current chain's signer proves membership in that
+root and immediately rotates the account to the next owner.
+
+This gives the wallet a stable multi-chain account address while preserving
+chain-specific derivation paths and avoiding first-signer reuse across chains.
