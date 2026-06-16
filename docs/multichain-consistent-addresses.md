@@ -21,6 +21,8 @@ The first signer cannot be part of the CREATE2 salt, because the wallet derives
 a different first signer on every chain. If the salt included the chain-local
 first signer, the user would get a different account address on every chain.
 
+Why do we need different signer on each chain (reuse protection)
+
 The goal is therefore:
 
 ```text
@@ -58,12 +60,6 @@ The root means:
 and only on their corresponding chains."
 ```
 
-It does not mean:
-
-```text
-"Every chain uses the same first signer."
-```
-
 The leaf includes the chain id, so a signer committed for one chain cannot be
 used to activate the account on another chain.
 
@@ -76,7 +72,7 @@ Arbitrum Sepolia    -> signer C
 OP Sepolia          -> signer D
 ```
 
-All four leaves produce one root. That same root is used everywhere. But on
+All four leaves produce one root which is used everywhere to produce a consistent account address, but on
 each chain, only the leaf for that chain can pass activation.
 
 ## Why This Keeps The Address Stable
