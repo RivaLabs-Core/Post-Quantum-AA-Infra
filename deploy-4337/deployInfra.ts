@@ -2,7 +2,7 @@
  * Gasless multi-chain infra deploy via ERC-4337 + Pimlico.
  *
  * This is the account-abstraction sibling of `script/Deploy.s.sol`. It deploys
- * the same two contracts — ForsVerifier and SimpleAccountFactory — to the same
+ * the same three contracts — ForsVerifier, SphincsVerifier and SimpleAccountFactory — to the same
  * deterministic addresses, but instead of an EOA `forge` broadcast it has a
  * smart account CALL the canonical CREATE2 deployer (0x4e59…4956C) inside a
  * Pimlico-sponsored UserOperation. No native token is needed on the deployer.
@@ -49,10 +49,10 @@ import { createPimlicoClient } from 'permissionless/clients/pimlico'
 const CREATE2_DEPLOYER: Address = '0x4e59b44847b379578588920cA78FbF26c0B4956C'
 const DEFAULT_ENTRYPOINT: Address = '0x0000000071727De22E5E9d8BAf0edAc6f37da032' // EntryPoint v0.7
 
-// keccak256("NiceTry.ForsVerifier.v1") and keccak256("NiceTry.SimpleAccountFactory.v1").
-// Pinned from `cast keccak` so a TS keccak/encoding mismatch fails loudly here
-// instead of silently deploying to the wrong addresses.
+// keccak256 of the verifier/factory salt strings. Pinned from `cast keccak` so a TS keccak/encoding
+// mismatch fails loudly here instead of silently deploying to the wrong addresses.
 const EXPECTED_FORS_SALT: Hex = '0x1891551135aa6aebbd0237cb36dd6bfc9cb284420e866248f2a7592bc01895e7'
+const EXPECTED_SPHINCS_SALT: Hex = '0x3ff6a18c6450afcde5a54133d0eb9ca318254e31b2118aac4741ea18b8a7d0b3'
 const EXPECTED_FACTORY_SALT: Hex = '0x86c6c38223aead0d46ad82406622f80d6eb574af29de7f40040b6e5e96765f49'
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
@@ -61,6 +61,7 @@ const REPO_ROOT = resolve(SCRIPT_DIR, '..')
 // Minimal read ABI for the post-deploy wiring checks (mirrors Deploy.s.sol asserts).
 const FACTORY_READ_ABI = [
   { type: 'function', name: 'VERIFIER', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] },
+  { type: 'function', name: 'SPHINCS_VERIFIER', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] },
   { type: 'function', name: 'ENTRY_POINT', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] },
   { type: 'function', name: 'ACCOUNT_IMPL', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] },
 ] as const
@@ -132,6 +133,9 @@ async function main() {
   const forsSalt: Hex = env('FORS_VERIFIER_SALT')
     ? asHex(requireEnv('FORS_VERIFIER_SALT'))
     : keccak256(toBytes('NiceTry.ForsVerifier.v1'))
+  const sphincsSalt: Hex = env('SPHINCS_VERIFIER_SALT')
+    ? asHex(requireEnv('SPHINCS_VERIFIER_SALT'))
+    : keccak256(toBytes('NiceTry.SphincsVerifier.v1'))
   const factorySalt: Hex = env('FACTORY_SALT')
     ? asHex(requireEnv('FACTORY_SALT'))
     : keccak256(toBytes('NiceTry.SimpleAccountFactory.v1'))
@@ -139,6 +143,9 @@ async function main() {
   // Self-test: the default salts must equal the Solidity constants.
   if (!env('FORS_VERIFIER_SALT') && forsSalt.toLowerCase() !== EXPECTED_FORS_SALT) {
     throw new Error(`FORS salt derivation drift: got ${forsSalt}, expected ${EXPECTED_FORS_SALT}`)
+  }
+  if (!env('SPHINCS_VERIFIER_SALT') && sphincsSalt.toLowerCase() !== EXPECTED_SPHINCS_SALT) {
+    throw new Error(`SPHINCS salt derivation drift: got ${sphincsSalt}, expected ${EXPECTED_SPHINCS_SALT}`)
   }
   if (!env('FACTORY_SALT') && factorySalt.toLowerCase() !== EXPECTED_FACTORY_SALT) {
     throw new Error(`Factory salt derivation drift: got ${factorySalt}, expected ${EXPECTED_FACTORY_SALT}`)
@@ -148,8 +155,14 @@ async function main() {
   const forsInitCode = loadCreationCode(resolve(REPO_ROOT, 'out/ForsVerifier.sol/ForsVerifier.json'))
   const predictedVerifier = getCreate2Address({ from: CREATE2_DEPLOYER, salt: forsSalt, bytecode: forsInitCode })
 
+  const sphincsInitCode = loadCreationCode(resolve(REPO_ROOT, 'out/SphincsVerifier.sol/SphincsVerifier.json'))
+  const predictedSphincsVerifier = getCreate2Address({ from: CREATE2_DEPLOYER, salt: sphincsSalt, bytecode: sphincsInitCode })
+
   const factoryCreationCode = loadCreationCode(resolve(REPO_ROOT, 'out/SimpleAccountFactory.sol/SimpleAccountFactory.json'))
-  const factoryArgs = encodeAbiParameters([{ type: 'address' }, { type: 'address' }], [entryPoint, predictedVerifier])
+  const factoryArgs = encodeAbiParameters(
+    [{ type: 'address' }, { type: 'address' }, { type: 'address' }],
+    [entryPoint, predictedVerifier, predictedSphincsVerifier],
+  )
   const factoryInitCode = concatHex([factoryCreationCode, factoryArgs])
   const predictedFactory = getCreate2Address({ from: CREATE2_DEPLOYER, salt: factorySalt, bytecode: factoryInitCode })
 
@@ -158,15 +171,17 @@ async function main() {
   console.log('EntryPoint         :', entryPoint)
   console.log('CREATE2 deployer   :', CREATE2_DEPLOYER)
   console.log('ForsVerifier salt  :', forsSalt)
+  console.log('SphincsVerifier salt:', sphincsSalt)
   console.log('Factory salt       :', factorySalt)
   console.log('Predicted verifier :', predictedVerifier)
+  console.log('Predicted sphincs  :', predictedSphincsVerifier)
   console.log('Predicted factory  :', predictedFactory)
 
   // Dry run is offline by design: it only needs the artifacts, so it works without
   // a live RPC and is the parity check against `forge script script/Deploy.s.sol`.
   if (dryRun) {
     console.log('\nDRY_RUN: predictions only, nothing sent.')
-    console.log('Cross-check: `forge script script/Deploy.s.sol` must print these same two addresses.')
+    console.log('Cross-check: `forge script script/Deploy.s.sol` must print these same three addresses.')
     return
   }
 
@@ -199,6 +214,9 @@ async function main() {
   const calls: Call[] = []
   if (await hasCode(predictedVerifier)) console.log('• ForsVerifier already deployed — skipping')
   else calls.push({ to: CREATE2_DEPLOYER, value: 0n, data: concatHex([forsSalt, forsInitCode]) })
+
+  if (await hasCode(predictedSphincsVerifier)) console.log('• SphincsVerifier already deployed — skipping')
+  else calls.push({ to: CREATE2_DEPLOYER, value: 0n, data: concatHex([sphincsSalt, sphincsInitCode]) })
 
   if (await hasCode(predictedFactory)) console.log('• SimpleAccountFactory already deployed — skipping')
   else calls.push({ to: CREATE2_DEPLOYER, value: 0n, data: concatHex([factorySalt, factoryInitCode]) })
@@ -249,10 +267,12 @@ async function main() {
 
   // ----- post-deploy verification (mirrors Deploy.s.sol require()s) -----
   if (!(await hasCode(predictedVerifier))) throw new Error('ForsVerifier missing after deploy')
+  if (!(await hasCode(predictedSphincsVerifier))) throw new Error('SphincsVerifier missing after deploy')
   if (!(await hasCode(predictedFactory))) throw new Error('SimpleAccountFactory missing after deploy')
 
-  const [wiredVerifier, wiredEntryPoint, accountImpl] = await Promise.all([
+  const [wiredVerifier, wiredSphincs, wiredEntryPoint, accountImpl] = await Promise.all([
     publicClient.readContract({ address: predictedFactory, abi: FACTORY_READ_ABI, functionName: 'VERIFIER' }),
+    publicClient.readContract({ address: predictedFactory, abi: FACTORY_READ_ABI, functionName: 'SPHINCS_VERIFIER' }),
     publicClient.readContract({ address: predictedFactory, abi: FACTORY_READ_ABI, functionName: 'ENTRY_POINT' }),
     publicClient.readContract({ address: predictedFactory, abi: FACTORY_READ_ABI, functionName: 'ACCOUNT_IMPL' }),
   ])
@@ -260,12 +280,16 @@ async function main() {
   if (getAddress(wiredVerifier) !== getAddress(predictedVerifier)) {
     throw new Error(`Verifier wiring mismatch: factory.VERIFIER()=${wiredVerifier} != ${predictedVerifier}`)
   }
+  if (getAddress(wiredSphincs) !== getAddress(predictedSphincsVerifier)) {
+    throw new Error(`SPHINCS verifier wiring mismatch: factory.SPHINCS_VERIFIER()=${wiredSphincs} != ${predictedSphincsVerifier}`)
+  }
   if (getAddress(wiredEntryPoint) !== getAddress(entryPoint)) {
     throw new Error(`EntryPoint wiring mismatch: factory.ENTRY_POINT()=${wiredEntryPoint} != ${entryPoint}`)
   }
 
   console.log('\n✓ Deployed & verified on chain', chainId)
   console.log('ForsVerifier         :', predictedVerifier)
+  console.log('SphincsVerifier      :', predictedSphincsVerifier)
   console.log('SimpleAccountFactory :', predictedFactory)
   console.log('Account implementation:', accountImpl)
 }

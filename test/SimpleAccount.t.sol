@@ -5,7 +5,9 @@ import "forge-std/Test.sol";
 import "../src/SimpleAccount.sol";
 import "../src/SimpleAccountFactory.sol";
 import {ISignatureVerifier} from "../src/Interfaces/ISignatureVerifier.sol";
+import {ISphincsVerifier} from "../src/Interfaces/ISphincsVerifier.sol";
 import {FORS_SIG_LEN} from "../src/Verifiers/ForsVerifier.sol";
+import {SPHINCS_SIG_LEN} from "../src/Verifiers/SphincsVerifier.sol";
 import {IEntryPoint} from "account-abstraction/interfaces/IEntryPoint.sol";
 import {PackedUserOperation} from "account-abstraction/interfaces/PackedUserOperation.sol";
 import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
@@ -23,6 +25,19 @@ contract MockSignatureVerifier is ISignatureVerifier {
     }
 }
 
+/// @dev Mock SPHINCS- verifier - test pre-sets the bool verify() should return.
+contract MockSphincsVerifier is ISphincsVerifier {
+    bool public _valid;
+
+    function setValid(bool v) external {
+        _valid = v;
+    }
+
+    function verify(bytes32, bytes32, bytes32, bytes calldata) external view returns (bool) {
+        return _valid;
+    }
+}
+
 contract SimpleAccountTest is Test {
     bytes32 internal constant INITIAL_SIGNER_LEAF_TYPEHASH =
         keccak256("NiceTryInitialSignerLeaf:v1(uint256 chainId,address signer)");
@@ -30,9 +45,14 @@ contract SimpleAccountTest is Test {
     uint256 internal constant ACTIVATION_TREE_LEAF_COUNT = 256;
     uint256 internal constant ACTIVATION_TREE_DEPTH = 8;
 
+    // Canonical (top-128-bit-aligned, low 128 bits zero) SPHINCS- backup public key for tests.
+    bytes32 internal constant BACKUP_PK_SEED = bytes32(uint256(0xB1B1B1B1B1B1B1B1B1B1B1B1B1B1B1B1) << 128);
+    bytes32 internal constant BACKUP_PK_ROOT = bytes32(uint256(0xB2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2) << 128);
+
     SimpleAccountFactory factory;
     SimpleAccount account;
     MockSignatureVerifier verifier;
+    MockSphincsVerifier sphincsVerifier;
     IEntryPoint entryPoint;
 
     address initialOwner = makeAddr("initialForsOwner");
@@ -56,9 +76,10 @@ contract SimpleAccountTest is Test {
         (initialSignerRoot, activationProof) = _buildActivationTree();
 
         verifier = new MockSignatureVerifier();
-        factory = new SimpleAccountFactory(entryPoint, verifier);
+        sphincsVerifier = new MockSphincsVerifier();
+        factory = new SimpleAccountFactory(entryPoint, verifier, sphincsVerifier);
 
-        address accountAddr = factory.createAccount(initialSignerRoot, 0);
+        address accountAddr = factory.createAccount(initialSignerRoot, BACKUP_PK_SEED, BACKUP_PK_ROOT, 0);
         account = SimpleAccount(payable(accountAddr));
 
         vm.deal(address(account), 100 ether);
@@ -73,39 +94,42 @@ contract SimpleAccountTest is Test {
         assertEq(account.initialSignerRoot(), initialSignerRoot);
         assertEq(address(account.ENTRY_POINT()), ENTRYPOINT);
         assertEq(address(account.VERIFIER()), address(verifier));
+        assertEq(address(account.SPHINCS_VERIFIER()), address(sphincsVerifier));
+        assertEq(account.backupPkSeed(), BACKUP_PK_SEED);
+        assertEq(account.backupPkRoot(), BACKUP_PK_ROOT);
     }
 
     function test_cannotReinitialize() public {
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        account.initialize(bytes32(uint256(1)));
+        account.initialize(bytes32(uint256(1)), BACKUP_PK_SEED, BACKUP_PK_ROOT);
     }
 
     function test_factoryRejectsZeroRoot() public {
         vm.expectRevert("SimpleAccountFactory: zero root");
-        factory.createAccount(bytes32(0), 1);
+        factory.createAccount(bytes32(0), BACKUP_PK_SEED, BACKUP_PK_ROOT, 1);
     }
 
     function test_factoryGetAddressRejectsZeroRoot() public {
         vm.expectRevert("SimpleAccountFactory: zero root");
-        factory.getAddress(bytes32(0), 1);
+        factory.getAddress(bytes32(0), BACKUP_PK_SEED, BACKUP_PK_ROOT, 1);
     }
 
     function test_factoryDifferentSaltGivesDifferentAddress() public view {
-        address addr0 = factory.getAddress(initialSignerRoot, 0);
-        address addr1 = factory.getAddress(initialSignerRoot, 1);
+        address addr0 = factory.getAddress(initialSignerRoot, BACKUP_PK_SEED, BACKUP_PK_ROOT, 0);
+        address addr1 = factory.getAddress(initialSignerRoot, BACKUP_PK_SEED, BACKUP_PK_ROOT, 1);
         assertTrue(addr0 != addr1);
     }
 
     function test_factoryDifferentRootGivesDifferentAddress() public {
         bytes32 otherRoot = _leaf(block.chainid, makeAddr("otherInitialOwner"));
-        address addr0 = factory.getAddress(initialSignerRoot, 0);
-        address addr1 = factory.getAddress(otherRoot, 0);
+        address addr0 = factory.getAddress(initialSignerRoot, BACKUP_PK_SEED, BACKUP_PK_ROOT, 0);
+        address addr1 = factory.getAddress(otherRoot, BACKUP_PK_SEED, BACKUP_PK_ROOT, 0);
         assertTrue(addr0 != addr1);
     }
 
     function test_factoryReturnsSameAddressIfAlreadyDeployed() public {
-        address first = factory.createAccount(initialSignerRoot, 0);
-        address second = factory.createAccount(initialSignerRoot, 0);
+        address first = factory.createAccount(initialSignerRoot, BACKUP_PK_SEED, BACKUP_PK_ROOT, 0);
+        address second = factory.createAccount(initialSignerRoot, BACKUP_PK_SEED, BACKUP_PK_ROOT, 0);
         assertEq(first, second);
     }
 
@@ -296,6 +320,123 @@ contract SimpleAccountTest is Test {
     }
 
     // =========================================================================
+    // SPHINCS- backup signer (co-equal, length-dispatched, cross-chain bootstrap)
+    // =========================================================================
+
+    function test_sphincsBackup_coEqualOpRotatesOwner() public {
+        _activateTo(owner0);
+        sphincsVerifier.setValid(true);
+        bytes memory callData = _execCalldata(recipient, 0, "", owner1);
+        PackedUserOperation memory op = _userOp(callData, _sphincsBlob());
+
+        vm.prank(ENTRYPOINT);
+        uint256 r = account.validateUserOp(op, keccak256("sphincs-op"), 0);
+
+        assertEq(r, 0);
+        assertEq(account.owner(), owner1);
+    }
+
+    function test_sphincsBackup_invalidRejected() public {
+        _activateTo(owner0);
+        sphincsVerifier.setValid(false);
+        bytes memory callData = _execCalldata(recipient, 0, "", owner1);
+        PackedUserOperation memory op = _userOp(callData, _sphincsBlob());
+
+        vm.prank(ENTRYPOINT);
+        uint256 r = account.validateUserOp(op, keccak256("sphincs-op"), 0);
+
+        assertEq(r, 1);
+        assertEq(account.owner(), owner0);
+    }
+
+    function test_sphincsBackup_keyUnchangedAfterUse() public {
+        _activateTo(owner0);
+        sphincsVerifier.setValid(true);
+        bytes memory callData = _execCalldata(recipient, 0, "", owner1);
+        PackedUserOperation memory op = _userOp(callData, _sphincsBlob());
+
+        vm.prank(ENTRYPOINT);
+        account.validateUserOp(op, keccak256("sphincs-op"), 0);
+
+        assertEq(account.backupPkSeed(), BACKUP_PK_SEED);
+        assertEq(account.backupPkRoot(), BACKUP_PK_ROOT);
+    }
+
+    /// @dev A SPHINCS_SIG_LEN blob must route to the SPHINCS- verifier even when the FORS verifier
+    ///      would accept — proving dispatch is by length, not by which verifier happens to say yes.
+    function test_lengthDispatch_sphincsLenRoutesToSphincs() public {
+        _activateTo(owner0);
+        verifier.setRecovered(owner0); // FORS would accept
+        sphincsVerifier.setValid(false); // SPHINCS- rejects
+        bytes memory callData = _execCalldata(recipient, 0, "", owner1);
+        PackedUserOperation memory op = _userOp(callData, _sphincsBlob());
+
+        vm.prank(ENTRYPOINT);
+        uint256 r = account.validateUserOp(op, keccak256("sphincs-op"), 0);
+
+        assertEq(r, 1);
+        assertEq(account.owner(), owner0);
+    }
+
+    function test_sphincsBootstrap_activatesInactiveAccount() public {
+        assertEq(account.owner(), address(0)); // inactive from setUp
+        sphincsVerifier.setValid(true);
+        bytes memory callData = _execCalldata(recipient, 0, "", owner0);
+        PackedUserOperation memory op = _userOp(callData, _sphincsBlob());
+
+        vm.prank(ENTRYPOINT);
+        uint256 r = account.validateUserOp(op, keccak256("bootstrap"), 0);
+
+        assertEq(r, 0);
+        assertEq(account.owner(), owner0);
+    }
+
+    /// @dev Cross-chain: on a chain absent from the activation tree (where FORS+Merkle activation
+    ///      would fail), the SPHINCS- backup can still bootstrap the account at the same address.
+    function test_sphincsBootstrap_worksOnUncommittedChain() public {
+        vm.chainId(block.chainid + 999_999);
+        assertEq(account.owner(), address(0));
+        sphincsVerifier.setValid(true);
+        bytes memory callData = _execCalldata(recipient, 0, "", owner0);
+        PackedUserOperation memory op = _userOp(callData, _sphincsBlob());
+
+        vm.prank(ENTRYPOINT);
+        uint256 r = account.validateUserOp(op, keccak256("bootstrap"), 0);
+
+        assertEq(r, 0);
+        assertEq(account.owner(), owner0);
+    }
+
+    // =========================================================================
+    // Backup-key binding into the deterministic address
+    // =========================================================================
+
+    function test_differentBackupKeyGivesDifferentAddress() public view {
+        address a0 = factory.getAddress(initialSignerRoot, BACKUP_PK_SEED, BACKUP_PK_ROOT, 0);
+        bytes32 otherSeed = bytes32(uint256(0xCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC) << 128);
+        address a1 = factory.getAddress(initialSignerRoot, otherSeed, BACKUP_PK_ROOT, 0);
+        assertTrue(a0 != a1);
+    }
+
+    function test_crossChain_addressIdenticalAcrossChains() public {
+        address a0 = factory.getAddress(initialSignerRoot, BACKUP_PK_SEED, BACKUP_PK_ROOT, 0);
+        vm.chainId(block.chainid + 12_345);
+        address a1 = factory.getAddress(initialSignerRoot, BACKUP_PK_SEED, BACKUP_PK_ROOT, 0);
+        assertEq(a0, a1);
+    }
+
+    function test_factoryRejectsZeroBackupKey() public {
+        vm.expectRevert("SimpleAccountFactory: zero backup key");
+        factory.createAccount(initialSignerRoot, bytes32(0), BACKUP_PK_ROOT, 7);
+    }
+
+    function test_createAccount_rejectsNonCanonicalBackupKey() public {
+        bytes32 nonCanonical = bytes32(uint256(1)); // low bit set -> not top-128-aligned
+        vm.expectRevert("SimpleAccount: non-canonical backup key");
+        factory.createAccount(initialSignerRoot, nonCanonical, BACKUP_PK_ROOT, 7);
+    }
+
+    // =========================================================================
     // Execute
     // =========================================================================
 
@@ -365,6 +506,10 @@ contract SimpleAccountTest is Test {
 
     function _dummyBlob() internal pure returns (bytes memory) {
         return new bytes(FORS_SIG_LEN);
+    }
+
+    function _sphincsBlob() internal pure returns (bytes memory) {
+        return new bytes(SPHINCS_SIG_LEN);
     }
 
     function _userOp(bytes memory callData, bytes memory sig) internal view returns (PackedUserOperation memory) {

@@ -19,6 +19,7 @@ docs/*
 !docs/fors-two-forest-cache.md
 !docs/signing-spec.node_modules
 !docs/frame-rotation-validation.md
+!docs/sphincs-backup-recovery.md
 
 images/
 
