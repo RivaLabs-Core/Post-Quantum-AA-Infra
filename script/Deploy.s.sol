@@ -9,22 +9,69 @@ import {IEntryPoint} from "account-abstraction/interfaces/IEntryPoint.sol";
 
 contract Deploy is Script {
     address constant ENTRYPOINT_V07 = 0x0000000071727De22E5E9d8BAf0edAc6f37da032;
+    address constant CREATE2_DEPLOYER = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
+
+    bytes32 constant DEFAULT_FORS_VERIFIER_SALT = keccak256("NiceTry.ForsVerifier.v1");
+    bytes32 constant DEFAULT_FACTORY_SALT = keccak256("NiceTry.SimpleAccountFactory.v1");
 
     function run() external {
-        address owner = 0xf83EE532e16f2998358f93a19DE6d7F6E7d146a4;
-        vm.startBroadcast(owner);
+        address entryPoint = vm.envOr("ENTRYPOINT", ENTRYPOINT_V07);
+        bytes32 forsVerifierSalt = vm.envOr("FORS_VERIFIER_SALT", DEFAULT_FORS_VERIFIER_SALT);
+        bytes32 factorySalt = vm.envOr("FACTORY_SALT", DEFAULT_FACTORY_SALT);
 
-        ForsVerifier forsVerifier = new ForsVerifier();
+        require(CREATE2_DEPLOYER.code.length != 0, "Deploy: missing CREATE2 deployer");
 
-        SimpleAccountFactory factory =
-            new SimpleAccountFactory(IEntryPoint(ENTRYPOINT_V07), ISignatureVerifier(address(forsVerifier)));
+        bytes memory forsVerifierInitCode = type(ForsVerifier).creationCode;
+        address predictedForsVerifier = _predictDeterministicAddress(forsVerifierSalt, forsVerifierInitCode);
 
-        console.log("ForsVerifier  deployed at:  ", address(forsVerifier));
-        console.log("Factory       deployed at:  ", address(factory));
-        console.log("Account implementation at: ", factory.ACCOUNT_IMPL());
-        console.log("EntryPoint:                 ", ENTRYPOINT_V07);
+        bytes memory factoryInitCode = abi.encodePacked(
+            type(SimpleAccountFactory).creationCode,
+            abi.encode(IEntryPoint(entryPoint), ISignatureVerifier(predictedForsVerifier))
+        );
+        address predictedFactory = _predictDeterministicAddress(factorySalt, factoryInitCode);
+
+        vm.startBroadcast();
+
+        address forsVerifier = _deployDeterministic(forsVerifierSalt, forsVerifierInitCode);
+        address factoryAddr = _deployDeterministic(factorySalt, factoryInitCode);
 
         vm.stopBroadcast();
+
+        SimpleAccountFactory factory = SimpleAccountFactory(factoryAddr);
+
+        console.log("CREATE2 deployer:           ", CREATE2_DEPLOYER);
+        console.log("ForsVerifier salt:          ");
+        console.logBytes32(forsVerifierSalt);
+        console.log("Factory salt:               ");
+        console.logBytes32(factorySalt);
+        console.log("ForsVerifier deployed at:   ", forsVerifier);
+        console.log("Factory deployed at:        ", factoryAddr);
+        console.log("Account implementation at: ", factory.ACCOUNT_IMPL());
+        console.log("EntryPoint:                 ", entryPoint);
+
+        require(forsVerifier == predictedForsVerifier, "Deploy: verifier address drift");
+        require(factoryAddr == predictedFactory, "Deploy: factory address drift");
+        require(factory.VERIFIER() == ISignatureVerifier(forsVerifier), "Deploy: verifier mismatch");
+        require(factory.ENTRY_POINT() == IEntryPoint(entryPoint), "Deploy: EntryPoint mismatch");
+    }
+
+    function _deployDeterministic(bytes32 salt, bytes memory initCode) internal returns (address deployed) {
+        deployed = _predictDeterministicAddress(salt, initCode);
+        if (deployed.code.length != 0) return deployed;
+
+        (bool ok, bytes memory data) = CREATE2_DEPLOYER.call(abi.encodePacked(salt, initCode));
+        if (!ok) {
+            assembly {
+                revert(add(data, 0x20), mload(data))
+            }
+        }
+
+        require(deployed.code.length != 0, "Deploy: CREATE2 deployment failed");
+    }
+
+    function _predictDeterministicAddress(bytes32 salt, bytes memory initCode) internal pure returns (address) {
+        bytes32 digest = keccak256(abi.encodePacked(bytes1(0xff), CREATE2_DEPLOYER, salt, keccak256(initCode)));
+        return address(uint160(uint256(digest)));
     }
 }
 

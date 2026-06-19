@@ -1,0 +1,21 @@
+{
+  "name": "nicetry-deploy-4337",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Gasless multi-chain infra deploy (ForsVerifier + SimpleAccountFactory) via ERC-4337 + Pimlico. AA sibling of script/Deploy.s.sol.",
+  "scripts": {
+    "deploy": "tsx deployInfra.ts",
+    "deploy:dry": "tsx deployInfra.ts --dry-run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "permissionless": "0.2.57",
+    "viem": "2.52.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

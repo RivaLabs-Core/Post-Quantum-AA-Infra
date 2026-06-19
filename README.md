@@ -33,6 +33,7 @@ deliberately abstract.
 src/
 +-- SimpleAccount.sol                    ERC-4337 FORS-backed account
 +-- SimpleAccountFactory.sol             FORS-only CREATE2 factory
++-- InitialSignerCommitment.sol          CREATE2 salt and activation leaf domains
 +-- FrameAccount.sol                      EIP-8141 frame account logic
 +-- frame/
 |   +-- FrameTransactionLib.sol           EIP-8141 constants
@@ -62,6 +63,7 @@ docs/
 +-- fors-parameters.md                  FORS+C parameter notes
 +-- fors-two-forest-cache.md            FORS+C cache/reuse notes
 +-- frame-rotation-validation.md        Frame rotation validation checks
++-- multichain-consistent-addresses.md  Root-based first activation
 +-- signing-spec.md                     Signing payload layout
 ```
 
@@ -94,7 +96,7 @@ forge build
 forge test
 ```
 
-215 tests across 15 suites. Coverage includes:
+221 tests across 15 suites. Coverage includes:
 
 - Round-trip cryptographic tests for the main FORS verifier.
 - Main account and frame-account tests.
@@ -106,8 +108,12 @@ forge test
 A deploy script lives at `script/Deploy.s.sol`. Running it deploys
 `ForsVerifier`, the FORS-only `SimpleAccountFactory`, and the single
 `SimpleAccount` implementation created by the factory constructor. The script
-targets the canonical ERC-4337 EntryPoint v0.7, which lives at the same address
-on mainnet, Sepolia, and other rollups.
+uses the standard CREATE2 deployer at
+`0x4e59b44847b379578588920cA78FbF26c0B4956C`, so the verifier and factory
+addresses are stable across chains when the same salts, bytecode, and
+constructor arguments are used. The script targets the canonical ERC-4337
+EntryPoint v0.7 by default, which lives at the same address on mainnet,
+Sepolia, and other rollups.
 
 ## Related Repos
 
