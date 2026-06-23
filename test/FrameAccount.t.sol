@@ -124,7 +124,7 @@ contract FrameAccountTest is Test {
     }
 
     function test_constructorSetsOwnerAndVerifier() public view {
-        assertEq(account.owner(), owner0);
+        assertEq(account.authState(owner0), 1);
         assertEq(address(account.VERIFIER()), address(verifier));
     }
 
@@ -143,7 +143,8 @@ contract FrameAccountTest is Test {
 
         assertTrue(account.approved());
         assertEq(account.approvedScope(), 3);
-        assertEq(account.owner(), owner0);
+        // Validation is side-effect-free: the signer stays active until the rotate frame runs.
+        assertEq(account.authState(owner0), 1);
     }
 
     function test_fallbackIsVerifyEntryPoint() public {
@@ -151,25 +152,39 @@ contract FrameAccountTest is Test {
 
         assertTrue(ok);
         assertTrue(account.approved());
-        assertEq(account.owner(), owner0);
+        assertEq(account.authState(owner0), 1);
     }
 
     function test_senderFrameRotatesOwnerWhenCalledBySelf() public {
         vm.prank(address(account));
-        account.rotateOwner(owner1);
+        account.rotateOwner(owner0, owner1);
 
-        assertEq(account.owner(), owner1);
+        assertEq(account.authState(owner0), 2);
+        assertEq(account.authState(owner1), 1);
     }
 
     function test_rotateOwnerRejectsDirectCaller() public {
         vm.expectRevert(FrameAccount.FrameAccountNotSelf.selector);
-        account.rotateOwner(owner1);
+        account.rotateOwner(owner0, owner1);
     }
 
     function test_rotateOwnerRejectsZeroOwner() public {
         vm.prank(address(account));
         vm.expectRevert(FrameAccount.FrameAccountZeroOwner.selector);
-        account.rotateOwner(address(0));
+        account.rotateOwner(owner0, address(0));
+    }
+
+    function test_rotateOwnerRejectsInactiveCurrent() public {
+        vm.prank(address(account));
+        vm.expectRevert(abi.encodeWithSelector(FrameAccount.FrameAccountKeyNotActive.selector, stranger));
+        account.rotateOwner(stranger, owner1);
+    }
+
+    function test_rotateOwnerRejectsNonFreshNext() public {
+        // owner0 is already active, so it is not a fresh next key.
+        vm.prank(address(account));
+        vm.expectRevert(abi.encodeWithSelector(FrameAccount.FrameAccountNextOwnerNotFresh.selector, owner0));
+        account.rotateOwner(owner0, owner0);
     }
 
     function test_badSignatureLengthRejects() public {
@@ -186,7 +201,7 @@ contract FrameAccountTest is Test {
     function test_wrongRecoveredSignerRejects() public {
         verifier.setRecovered(stranger);
 
-        vm.expectRevert(abi.encodeWithSelector(FrameAccount.FrameAccountInvalidSignature.selector, stranger, owner0));
+        vm.expectRevert(abi.encodeWithSelector(FrameAccount.FrameAccountInvalidSignature.selector, stranger));
         account.validateForTest(_dummyBlob());
 
         assertFalse(account.approved());
@@ -195,7 +210,7 @@ contract FrameAccountTest is Test {
     function test_zeroRecoveredSignerRejects() public {
         verifier.setRecovered(address(0));
 
-        vm.expectRevert(abi.encodeWithSelector(FrameAccount.FrameAccountInvalidSignature.selector, address(0), owner0));
+        vm.expectRevert(abi.encodeWithSelector(FrameAccount.FrameAccountInvalidSignature.selector, address(0)));
         account.validateForTest(_dummyBlob());
 
         assertFalse(account.approved());
@@ -252,7 +267,9 @@ contract FrameAccountTest is Test {
     }
 
     function test_rotationFrameMustCallRotateOwner() public {
-        bytes memory wrongCall = abi.encodeWithSelector(bytes4(keccak256("wrong(address)")), owner1);
+        // Same byte length as rotateOwner(address,address) so the length check passes
+        // and the selector check is what rejects it.
+        bytes memory wrongCall = abi.encodeWithSelector(bytes4(keccak256("wrong(address,address)")), owner0, owner1);
 
         account.clearFrames();
         account.pushFrame(VERIFY_MODE, 0, address(account), 0, "");
@@ -260,8 +277,23 @@ contract FrameAccountTest is Test {
 
         vm.expectRevert(
             abi.encodeWithSelector(
-                FrameAccount.FrameAccountRotationFrameWrongSelector.selector, 1, bytes4(keccak256("wrong(address)"))
+                FrameAccount.FrameAccountRotationFrameWrongSelector.selector,
+                1,
+                bytes4(keccak256("wrong(address,address)"))
             )
+        );
+        account.validateForTest(_dummyBlob());
+    }
+
+    function test_rotationFrameMustBurnRecoveredSigner() public {
+        // Rotation frame whose currentKey is not the recovered signer is rejected.
+        account.clearFrames();
+        account.pushFrame(VERIFY_MODE, 0, address(account), 0, "");
+        account.pushFrame(SENDER_MODE, 0, address(account), 0, _rotateOwnerCalldata(stranger, owner1));
+        account.setCurrentFrameIndex(0);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(FrameAccount.FrameAccountRotationFrameWrongCurrent.selector, 1, stranger)
         );
         account.validateForTest(_dummyBlob());
     }
@@ -294,12 +326,16 @@ contract FrameAccountTest is Test {
     {
         account.clearFrames();
         account.pushFrame(VERIFY_MODE, 0, address(account), 0, "");
-        account.pushFrame(mode, flags, target, value, _rotateOwnerCalldata(nextOwner));
+        account.pushFrame(mode, flags, target, value, _rotateOwnerCalldata(owner0, nextOwner));
         account.setCurrentFrameIndex(0);
     }
 
     function _rotateOwnerCalldata(address nextOwner) internal view returns (bytes memory) {
-        return abi.encodeWithSelector(account.rotateOwner.selector, nextOwner);
+        return _rotateOwnerCalldata(owner0, nextOwner);
+    }
+
+    function _rotateOwnerCalldata(address currentKey, address nextOwner) internal view returns (bytes memory) {
+        return abi.encodeWithSelector(account.rotateOwner.selector, currentKey, nextOwner);
     }
 
     function _dummyBlob() internal pure returns (bytes memory) {

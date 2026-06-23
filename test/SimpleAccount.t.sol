@@ -69,7 +69,7 @@ contract SimpleAccountTest is Test {
     // =========================================================================
 
     function test_factoryDeploysInactiveAccount() public view {
-        assertEq(account.owner(), address(0));
+        assertFalse(account.activated());
         assertEq(account.initialSignerRoot(), initialSignerRoot);
         assertEq(address(account.ENTRY_POINT()), ENTRYPOINT);
         assertEq(address(account.VERIFIER()), address(verifier));
@@ -122,7 +122,8 @@ contract SimpleAccountTest is Test {
         uint256 r = account.validateUserOp(op, keccak256("activation"), 0);
 
         assertEq(r, 0);
-        assertEq(account.owner(), owner0);
+        assertTrue(account.activated());
+        assertEq(account.authState(owner0), 1);
     }
 
     function test_activationBadProof_rejected() public {
@@ -137,7 +138,8 @@ contract SimpleAccountTest is Test {
         uint256 r = account.validateUserOp(op, keccak256("activation"), 0);
 
         assertEq(r, 1);
-        assertEq(account.owner(), address(0));
+        assertFalse(account.activated());
+        assertEq(account.authState(owner0), 0);
     }
 
     function test_activationWrongChain_rejected() public {
@@ -151,7 +153,8 @@ contract SimpleAccountTest is Test {
         uint256 r = account.validateUserOp(op, keccak256("activation"), 0);
 
         assertEq(r, 1);
-        assertEq(account.owner(), address(0));
+        assertFalse(account.activated());
+        assertEq(account.authState(owner0), 0);
     }
 
     function test_plainForsSigCannotActivate() public {
@@ -163,7 +166,8 @@ contract SimpleAccountTest is Test {
         uint256 r = account.validateUserOp(op, keccak256("activation"), 0);
 
         assertEq(r, 1);
-        assertEq(account.owner(), address(0));
+        assertFalse(account.activated());
+        assertEq(account.authState(owner0), 0);
     }
 
     // =========================================================================
@@ -181,7 +185,8 @@ contract SimpleAccountTest is Test {
         uint256 r = account.validateUserOp(op, keccak256("op"), 0);
 
         assertEq(r, 0);
-        assertEq(account.owner(), owner1);
+        assertEq(account.authState(owner0), 2);
+        assertEq(account.authState(owner1), 1);
     }
 
     function test_strangerSig_rejected() public {
@@ -195,7 +200,8 @@ contract SimpleAccountTest is Test {
         uint256 r = account.validateUserOp(op, keccak256("op"), 0);
 
         assertEq(r, 1);
-        assertEq(account.owner(), owner0);
+        assertEq(account.authState(owner0), 1);
+        assertEq(account.authState(owner1), 0);
     }
 
     function test_zeroRecovered_rejected() public {
@@ -209,7 +215,57 @@ contract SimpleAccountTest is Test {
         uint256 r = account.validateUserOp(op, keccak256("op"), 0);
 
         assertEq(r, 1);
-        assertEq(account.owner(), owner0);
+        assertEq(account.authState(owner0), 1);
+    }
+
+    function test_burnedKeyReuse_rejected() public {
+        _activateTo(owner0);
+
+        // First op burns owner0, activates owner1.
+        verifier.setRecovered(owner0);
+        _validate(owner1, keccak256("op0"));
+        assertEq(account.authState(owner0), 2);
+
+        // owner0 is now burned; reusing it must fail and change nothing.
+        verifier.setRecovered(owner0);
+        bytes memory callData = _execCalldata(recipient, 0, "", owner2);
+        PackedUserOperation memory op = _userOp(callData, _dummyBlob());
+
+        vm.prank(ENTRYPOINT);
+        uint256 r = account.validateUserOp(op, keccak256("op1"), 0);
+
+        assertEq(r, 1);
+        assertEq(account.authState(owner1), 1);
+        assertEq(account.authState(owner2), 0);
+    }
+
+    function test_rotateToActiveKey_reverts() public {
+        _activateTo(owner0);
+
+        // Rotating onto an already-active key (owner0 itself) is rejected.
+        verifier.setRecovered(owner0);
+        bytes memory callData = _execCalldata(recipient, 0, "", owner0);
+        PackedUserOperation memory op = _userOp(callData, _dummyBlob());
+
+        vm.prank(ENTRYPOINT);
+        vm.expectRevert("SimpleAccount: next owner not fresh");
+        account.validateUserOp(op, keccak256("op"), 0);
+    }
+
+    function test_rotateToBurnedKey_reverts() public {
+        _activateTo(owner0);
+
+        verifier.setRecovered(owner0);
+        _validate(owner1, keccak256("op0"));
+
+        // owner0 is burned; rotating back onto it is rejected.
+        verifier.setRecovered(owner1);
+        bytes memory callData = _execCalldata(recipient, 0, "", owner0);
+        PackedUserOperation memory op = _userOp(callData, _dummyBlob());
+
+        vm.prank(ENTRYPOINT);
+        vm.expectRevert("SimpleAccount: next owner not fresh");
+        account.validateUserOp(op, keccak256("op1"), 0);
     }
 
     function test_badSigLen_rejected() public {
@@ -223,7 +279,7 @@ contract SimpleAccountTest is Test {
         uint256 r = account.validateUserOp(op, keccak256("op"), 0);
 
         assertEq(r, 1);
-        assertEq(account.owner(), owner0);
+        assertEq(account.authState(owner0), 1);
     }
 
     function test_revertsOnBadCalldataLen() public {
@@ -280,7 +336,7 @@ contract SimpleAccountTest is Test {
         vm.expectRevert("SimpleAccount: prefund failed");
         account.validateUserOp(op, keccak256("op"), address(account).balance + 1);
 
-        assertEq(account.owner(), owner0);
+        assertEq(account.authState(owner0), 1);
     }
 
     function test_multiTxRotationChain() public {
@@ -288,11 +344,13 @@ contract SimpleAccountTest is Test {
 
         verifier.setRecovered(owner0);
         _validate(owner1, keccak256("op0"));
-        assertEq(account.owner(), owner1);
+        assertEq(account.authState(owner0), 2);
+        assertEq(account.authState(owner1), 1);
 
         verifier.setRecovered(owner1);
         _validate(owner2, keccak256("op1"));
-        assertEq(account.owner(), owner2);
+        assertEq(account.authState(owner1), 2);
+        assertEq(account.authState(owner2), 1);
     }
 
     // =========================================================================
@@ -352,7 +410,8 @@ contract SimpleAccountTest is Test {
         vm.prank(ENTRYPOINT);
         uint256 r = account.validateUserOp(op, keccak256("activation"), 0);
         assertEq(r, 0);
-        assertEq(account.owner(), nextOwner);
+        assertTrue(account.activated());
+        assertEq(account.authState(nextOwner), 1);
     }
 
     function _execCalldata(address to, uint256 value, bytes memory data, address nextOwner)

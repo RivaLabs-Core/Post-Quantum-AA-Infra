@@ -24,7 +24,15 @@ contract SimpleAccount is BaseAccount, TokenCallbackHandler, Initializable {
     uint256 private constant ACTIVATION_HEADER_LENGTH = 3;
     uint256 private constant MAX_ACTIVATION_PROOF_LENGTH = 64;
 
-    address public owner;
+    uint8 internal constant AUTH_NONE = 0; // never authorized
+    uint8 internal constant AUTH_ACTIVE = 1; // authorized, may sign exactly one UserOp
+    uint8 internal constant AUTH_BURNED = 2; // already used, never valid again
+
+    /// @notice Per-signer authorization state. Each device runs its own key chain;
+    ///         a key is authorized once, signs once, then is burned.
+    mapping(address => uint8) public authState;
+    /// @notice False until the first signer is activated against initialSignerRoot.
+    bool public activated;
     bytes32 public initialSignerRoot;
     IEntryPoint public immutable ENTRY_POINT;
     ISignatureVerifier public immutable VERIFIER;
@@ -38,7 +46,6 @@ contract SimpleAccount is BaseAccount, TokenCallbackHandler, Initializable {
     constructor(IEntryPoint _entryPoint, ISignatureVerifier _verifier) {
         ENTRY_POINT = _entryPoint;
         VERIFIER = _verifier;
-        owner = address(this);
         _disableInitializers();
     }
 
@@ -51,7 +58,6 @@ contract SimpleAccount is BaseAccount, TokenCallbackHandler, Initializable {
     function initialize(bytes32 _initialSignerRoot) public virtual initializer {
         require(_initialSignerRoot != bytes32(0), "SimpleAccount: zero root");
         initialSignerRoot = _initialSignerRoot;
-        owner = address(0);
         emit AccountInitialized(entryPoint(), _initialSignerRoot, address(VERIFIER));
     }
 
@@ -66,7 +72,7 @@ contract SimpleAccount is BaseAccount, TokenCallbackHandler, Initializable {
 
         address nextOwner = address(bytes20(userOp.callData[userOp.callData.length - 20:]));
 
-        if (owner == address(0)) {
+        if (!activated) {
             return _validateActivationSignature(userOp.signature, userOpHash, nextOwner);
         }
 
@@ -76,11 +82,11 @@ contract SimpleAccount is BaseAccount, TokenCallbackHandler, Initializable {
 
         address recovered = VERIFIER.recover(userOp.signature, userOpHash);
 
-        if (recovered == address(0) || recovered != owner) {
+        if (recovered == address(0) || authState[recovered] != AUTH_ACTIVE) {
             return SIG_VALIDATION_FAILED;
         }
 
-        _rotateOwner(nextOwner);
+        _rotate(recovered, nextOwner);
         return SIG_VALIDATION_SUCCESS;
     }
 
@@ -123,8 +129,14 @@ contract SimpleAccount is BaseAccount, TokenCallbackHandler, Initializable {
             return SIG_VALIDATION_FAILED;
         }
 
+        require(nextOwner != address(0), "SimpleAccount: zero next owner");
+        require(authState[nextOwner] == AUTH_NONE, "SimpleAccount: next owner not fresh");
+
+        activated = true;
+        authState[nextOwner] = AUTH_ACTIVE;
+
         emit AccountActivated(initialSignerRoot, recovered, nextOwner);
-        _rotateOwner(nextOwner);
+        emit OwnerRotated(address(0), nextOwner);
         return SIG_VALIDATION_SUCCESS;
     }
 
@@ -174,11 +186,15 @@ contract SimpleAccount is BaseAccount, TokenCallbackHandler, Initializable {
         }
     }
 
-    function _rotateOwner(address nextOwner) internal {
-        require(nextOwner != address(0), "SimpleAccount: zero next owner");
-        address previous = owner;
-        owner = nextOwner;
-        emit OwnerRotated(previous, nextOwner);
+    /// @dev Strict rotation: burn the signer that authorized this op and activate the
+    ///      appended next key. `next` must be fresh (AUTH_NONE) to prevent re-authorizing
+    ///      a burned key or clobbering an already-active one.
+    function _rotate(address current, address next) internal {
+        require(next != address(0), "SimpleAccount: zero next owner");
+        require(authState[next] == AUTH_NONE, "SimpleAccount: next owner not fresh");
+        authState[current] = AUTH_BURNED;
+        authState[next] = AUTH_ACTIVE;
+        emit OwnerRotated(current, next);
     }
 
     /// @notice Check this account's deposit in the EntryPoint.
