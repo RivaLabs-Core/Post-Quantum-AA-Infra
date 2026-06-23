@@ -11,18 +11,28 @@ import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.s
 import {MerkleProofLib} from "solady/utils/MerkleProofLib.sol";
 import {InitialSignerCommitment} from "./InitialSignerCommitment.sol";
 import {ISignatureVerifier} from "./Interfaces/ISignatureVerifier.sol";
+import {ISphincsVerifier} from "./Interfaces/ISphincsVerifier.sol";
 import {FORS_SIG_LEN} from "./Verifiers/ForsVerifier.sol";
+import {SPHINCS_SIG_LEN} from "./Verifiers/SphincsVerifier.sol";
 
 /// @title SimpleAccount
-/// @notice ERC-4337 smart account using standalone FORS as the primary signer.
+/// @notice ERC-4337 smart account using standalone FORS as the primary signer, with a durable,
+///         co-equal SPHINCS- backup signer for recovery and cross-chain bootstrap. Multiple devices
+///         are supported via per-signer authState; new devices are enrolled with addSigner().
 ///
-///         activation signature = [activation version][Merkle proof][FORS_SIG_LEN bytes FORS blob]
-///         normal signature     = [FORS_SIG_LEN bytes FORS blob]
+///         Signatures are dispatched purely by length (no type tag):
+///           FORS normal  = [FORS_SIG_LEN bytes FORS blob]                       (activated)
+///           activation   = [version(1)][proofLen(2)][Merkle proof][FORS blob]   (!activated)
+///           SPHINCS-     = [SPHINCS_SIG_LEN bytes SPHINCS- blob]                 (either state)
+///         The three length classes are kept disjoint (constructor guard).
 ///         userOp.callData  = [... any call ...][20 bytes nextOwner]
 contract SimpleAccount is BaseAccount, TokenCallbackHandler, Initializable {
     // version(1) + proofLen(2)
     uint256 private constant ACTIVATION_HEADER_LENGTH = 3;
     uint256 private constant MAX_ACTIVATION_PROOF_LENGTH = 64;
+    // Top-128-bit mask: SPHINCS- public-key words must be canonical (low 128 bits zero), matching
+    // the verifier's N_MASK; a non-canonical key would make verify() revert on every backup op.
+    bytes32 private constant BACKUP_PK_MASK = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF00000000000000000000000000000000;
 
     uint8 internal constant AUTH_NONE = 0; // never authorized
     uint8 internal constant AUTH_ACTIVE = 1; // authorized, may sign exactly one UserOp
@@ -34,18 +44,40 @@ contract SimpleAccount is BaseAccount, TokenCallbackHandler, Initializable {
     /// @notice False until the first signer is activated against initialSignerRoot.
     bool public activated;
     bytes32 public initialSignerRoot;
+    // Durable SPHINCS- backup public key (chain-independent), committed into the account address via
+    // the CREATE2 salt and stored at initialize(). The key itself is never rotated.
+    bytes32 public backupPkSeed;
+    bytes32 public backupPkRoot;
     IEntryPoint public immutable ENTRY_POINT;
     ISignatureVerifier public immutable VERIFIER;
+    ISphincsVerifier public immutable SPHINCS_VERIFIER;
 
     event AccountInitialized(
         IEntryPoint indexed entryPoint, bytes32 indexed initialSignerRoot, address indexed verifier
     );
     event AccountActivated(bytes32 indexed initialSignerRoot, address indexed initialOwner, address indexed nextOwner);
     event OwnerRotated(address indexed previousOwner, address indexed newOwner);
+    /// @notice Emitted when a SPHINCS- backup signature authorizes an op (recovery, bootstrap, or co-equal use).
+    event BackupSignerUsed(bytes32 indexed userOpHash);
+    /// @notice Emitted when a new signer (device) is authorized via addSigner().
+    event SignerAdded(address indexed signer);
 
-    constructor(IEntryPoint _entryPoint, ISignatureVerifier _verifier) {
+    constructor(IEntryPoint _entryPoint, ISignatureVerifier _verifier, ISphincsVerifier _sphincsVerifier) {
         ENTRY_POINT = _entryPoint;
         VERIFIER = _verifier;
+        SPHINCS_VERIFIER = _sphincsVerifier;
+
+        // Length-dispatch disjointness invariant (see _validateSignature): the FORS, SPHINCS-, and
+        // activation-envelope length classes must never collide, else a signature could be routed to
+        // the wrong verifier. Checked once, at implementation-contract deploy time.
+        require(SPHINCS_SIG_LEN != FORS_SIG_LEN, "SimpleAccount: fors/sphincs len clash");
+        uint256 minEnvelope = ACTIVATION_HEADER_LENGTH + FORS_SIG_LEN;
+        require(
+            SPHINCS_SIG_LEN < minEnvelope || (SPHINCS_SIG_LEN - minEnvelope) % 32 != 0
+                || (SPHINCS_SIG_LEN - minEnvelope) / 32 > MAX_ACTIVATION_PROOF_LENGTH,
+            "SimpleAccount: sphincs len in envelope"
+        );
+
         _disableInitializers();
     }
 
@@ -54,10 +86,25 @@ contract SimpleAccount is BaseAccount, TokenCallbackHandler, Initializable {
         return ENTRY_POINT;
     }
 
-    /// @dev Called once by the factory after clone deployment.
-    function initialize(bytes32 _initialSignerRoot) public virtual initializer {
+    /// @dev Called once by the factory after clone deployment. The backup key is bound into the
+    ///      account address via the CREATE2 salt (see SimpleAccountFactory + InitialSignerCommitment),
+    ///      so storing it here cannot be front-run with a different key at the same address.
+    function initialize(bytes32 _initialSignerRoot, bytes32 _backupPkSeed, bytes32 _backupPkRoot)
+        public
+        virtual
+        initializer
+    {
         require(_initialSignerRoot != bytes32(0), "SimpleAccount: zero root");
+        require(_backupPkSeed != bytes32(0) && _backupPkRoot != bytes32(0), "SimpleAccount: zero backup key");
+        // Reject non-canonical backup keys up front (low 128 bits must be zero) so verify() — which
+        // reverts on non-canonical pubkeys — can never brick the backup path.
+        require(
+            _backupPkSeed == (_backupPkSeed & BACKUP_PK_MASK) && _backupPkRoot == (_backupPkRoot & BACKUP_PK_MASK),
+            "SimpleAccount: non-canonical backup key"
+        );
         initialSignerRoot = _initialSignerRoot;
+        backupPkSeed = _backupPkSeed;
+        backupPkRoot = _backupPkRoot;
         emit AccountInitialized(entryPoint(), _initialSignerRoot, address(VERIFIER));
     }
 
@@ -71,6 +118,13 @@ contract SimpleAccount is BaseAccount, TokenCallbackHandler, Initializable {
         require(userOp.callData.length >= 24, "SimpleAccount: missing next owner"); // 4 selector + 20
 
         address nextOwner = address(bytes20(userOp.callData[userOp.callData.length - 20:]));
+
+        // SPHINCS- backup path: routed purely by length, verified against the committed backup key,
+        // valid in BOTH the inactive (cross-chain bootstrap) and active states. Co-equal — it
+        // authorizes any op; a new device is enrolled by the op's callData calling addSigner().
+        if (userOp.signature.length == SPHINCS_SIG_LEN) {
+            return _validateSphincsSignature(userOp.signature, userOpHash);
+        }
 
         if (!activated) {
             return _validateActivationSignature(userOp.signature, userOpHash, nextOwner);
@@ -140,6 +194,22 @@ contract SimpleAccount is BaseAccount, TokenCallbackHandler, Initializable {
         return SIG_VALIDATION_SUCCESS;
     }
 
+    /// @dev SPHINCS- backup verification (co-equal, durable). A valid signature over `userOpHash`
+    ///      against the committed backup key authorizes the op. It performs no authState mutation and
+    ///      never rotates — the backup key is a static parallel authority; to enroll a device the op's
+    ///      callData calls addSigner(). Length is guaranteed == SPHINCS_SIG_LEN and the stored key is
+    ///      canonical (see initialize), so verify() returns a bool and never reverts.
+    function _validateSphincsSignature(bytes calldata signature, bytes32 userOpHash)
+        internal
+        returns (uint256 validationData)
+    {
+        if (!SPHINCS_VERIFIER.verify(backupPkSeed, backupPkRoot, userOpHash, signature)) {
+            return SIG_VALIDATION_FAILED;
+        }
+        emit BackupSignerUsed(userOpHash);
+        return SIG_VALIDATION_SUCCESS;
+    }
+
     function _payPrefund(uint256 missingAccountFunds) internal virtual override {
         if (missingAccountFunds > 0) {
             (bool ok,) = payable(msg.sender).call{value: missingAccountFunds}("");
@@ -195,6 +265,19 @@ contract SimpleAccount is BaseAccount, TokenCallbackHandler, Initializable {
         authState[current] = AUTH_BURNED;
         authState[next] = AUTH_ACTIVE;
         emit OwnerRotated(current, next);
+    }
+
+    /// @notice Authorize a new signer (device). Reachable by any validated UserOp (FORS or SPHINCS-)
+    ///         through its callData; guarded to EntryPoint/self. Enrollment only adds (NONE -> ACTIVE):
+    ///         it never burns and never rotates an existing chain. Flips `activated` so a pre-activation
+    ///         SPHINCS- bootstrap leaves the account usable on chains absent from the activation tree.
+    function addSigner(address newSigner) external {
+        _requireFromEntryPointOrSelf();
+        require(newSigner != address(0), "SimpleAccount: zero signer");
+        require(authState[newSigner] == AUTH_NONE, "SimpleAccount: signer not fresh");
+        authState[newSigner] = AUTH_ACTIVE;
+        if (!activated) activated = true;
+        emit SignerAdded(newSigner);
     }
 
     /// @notice Check this account's deposit in the EntryPoint.
