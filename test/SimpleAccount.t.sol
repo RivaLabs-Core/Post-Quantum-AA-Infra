@@ -378,46 +378,49 @@ contract SimpleAccountTest is Test {
     }
 
     // =========================================================================
-    // SPHINCS- backup signer (co-equal, length-dispatched, cross-chain bootstrap)
+    // SPHINCS- backup signer (co-equal, length-dispatched, rotates the FORS owner)
     // =========================================================================
 
-    function test_sphincsBackup_coEqualOpSucceeds() public {
+    /// @dev A SPHINCS- op carries [execute][currentKey][nextOwner] and rotates the FORS owner
+    ///      identically to a FORS op: burn currentKey (even though it never signed), activate nextOwner.
+    function test_sphincsRotatesFORSOwner() public {
         _activateTo(owner0);
         sphincsVerifier.setValid(true);
-        bytes memory callData = _execCalldata(recipient, 0, "", owner1);
+        bytes memory callData = _execCalldata2(recipient, 0, "", owner0, owner1);
         PackedUserOperation memory op = _userOp(callData, _sphincsBlob());
 
         vm.prank(ENTRYPOINT);
         uint256 r = account.validateUserOp(op, keccak256("sphincs-op"), 0);
 
         assertEq(r, 0);
-        // SPHINCS- is co-equal but does NOT rotate: existing signers are untouched.
-        assertEq(account.authState(owner0), 1);
-        assertEq(account.authState(owner1), 0);
+        assertEq(account.authState(owner0), 2); // burned for recovery, without owner0 ever signing
+        assertEq(account.authState(owner1), 1); // new active FORS owner
     }
 
-    function test_sphincsBackup_invalidRejected() public {
+    function test_sphincsInvalidRejected() public {
         _activateTo(owner0);
         sphincsVerifier.setValid(false);
-        bytes memory callData = _execCalldata(recipient, 0, "", owner1);
+        bytes memory callData = _execCalldata2(recipient, 0, "", owner0, owner1);
         PackedUserOperation memory op = _userOp(callData, _sphincsBlob());
 
         vm.prank(ENTRYPOINT);
         uint256 r = account.validateUserOp(op, keccak256("sphincs-op"), 0);
 
         assertEq(r, 1);
-        assertEq(account.authState(owner0), 1);
+        assertEq(account.authState(owner0), 1); // unchanged
+        assertEq(account.authState(owner1), 0);
     }
 
     function test_sphincsBackup_keyUnchangedAfterUse() public {
         _activateTo(owner0);
         sphincsVerifier.setValid(true);
-        bytes memory callData = _execCalldata(recipient, 0, "", owner1);
+        bytes memory callData = _execCalldata2(recipient, 0, "", owner0, owner1);
         PackedUserOperation memory op = _userOp(callData, _sphincsBlob());
 
         vm.prank(ENTRYPOINT);
         account.validateUserOp(op, keccak256("sphincs-op"), 0);
 
+        // The backup key is the static parallel authority — never rotated/consumed.
         assertEq(account.backupPkSeed(), BACKUP_PK_SEED);
         assertEq(account.backupPkRoot(), BACKUP_PK_ROOT);
     }
@@ -428,7 +431,7 @@ contract SimpleAccountTest is Test {
         _activateTo(owner0);
         verifier.setRecovered(owner0); // FORS would accept
         sphincsVerifier.setValid(false); // SPHINCS- rejects
-        bytes memory callData = _execCalldata(recipient, 0, "", owner1);
+        bytes memory callData = _execCalldata2(recipient, 0, "", owner0, owner1);
         PackedUserOperation memory op = _userOp(callData, _sphincsBlob());
 
         vm.prank(ENTRYPOINT);
@@ -438,18 +441,20 @@ contract SimpleAccountTest is Test {
         assertEq(account.authState(owner0), 1);
     }
 
-    /// @dev SPHINCS- validates in both states; pre-activation it is the cross-chain authority that
-    ///      can drive enrollment (its callData calls addSigner) on chains absent from the tree.
-    function test_sphincsValidatesBeforeActivation() public {
+    /// @dev Cross-chain bootstrap: pre-activation a SPHINCS- op rotates in the first FORS owner
+    ///      (currentKey can be a throwaway since none exists yet) and flips activated.
+    function test_sphincsBootstrapRotates() public {
         assertFalse(account.activated());
         sphincsVerifier.setValid(true);
-        bytes memory callData = _execCalldata(recipient, 0, "", owner0);
+        bytes memory callData = _execCalldata2(recipient, 0, "", address(0), owner0);
         PackedUserOperation memory op = _userOp(callData, _sphincsBlob());
 
         vm.prank(ENTRYPOINT);
         uint256 r = account.validateUserOp(op, keccak256("bootstrap"), 0);
 
         assertEq(r, 0);
+        assertTrue(account.activated());
+        assertEq(account.authState(owner0), 1);
     }
 
     // =========================================================================
@@ -600,6 +605,17 @@ contract SimpleAccountTest is Test {
         returns (bytes memory)
     {
         return abi.encodePacked(abi.encodeWithSelector(account.execute.selector, to, value, data), bytes20(nextOwner));
+    }
+
+    /// @dev SPHINCS- calldata layout: [execute(...)][currentKey][nextOwner] (40-byte rotation tail).
+    function _execCalldata2(address to, uint256 value, bytes memory data, address currentKey, address nextOwner)
+        internal
+        view
+        returns (bytes memory)
+    {
+        return abi.encodePacked(
+            abi.encodeWithSelector(account.execute.selector, to, value, data), bytes20(currentKey), bytes20(nextOwner)
+        );
     }
 
     function _dummyBlob() internal pure returns (bytes memory) {

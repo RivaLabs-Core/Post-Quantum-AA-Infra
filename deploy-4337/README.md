@@ -1,7 +1,7 @@
 # deploy-4337 — gasless infra deploy via ERC-4337 + Pimlico
 
 The account-abstraction sibling of [`script/Deploy.s.sol`](../script/Deploy.s.sol).
-It deploys the same two infra contracts — `ForsVerifier` and
+It deploys the same three infra contracts — `ForsVerifier`, `SphincsVerifier`, and
 `SimpleAccountFactory` — to the **same deterministic addresses**, but pays for gas
 through a Pimlico paymaster instead of native token on the deployer EOA.
 
@@ -17,7 +17,7 @@ bytecode straight from the forge `out/` artifacts to guarantee that.
 
 ## What this does and does not buy you
 
-- The **one-time infra deploy** (verifier + factory) becomes gasless — that's this script.
+- The **one-time infra deploy** (verifiers + factory) becomes gasless — that's this script.
 - **Per-user account creation** is already gasless via standard 4337: the wallet's
   first UserOp carries the factory `initCode` and Pimlico sponsors it. That path
   does not need this script.
@@ -87,6 +87,6 @@ the predicted addresses are unchanged.
 ## How it stays in lockstep with `Deploy.s.sol`
 
 Same constants (CREATE2 deployer, EntryPoint v0.7, salt strings), same initcode
-construction (factory args = `abi.encode(entryPoint, predictedVerifier)`), and the
-same post-deploy assertions (`VERIFIER()`, `ENTRY_POINT()`, address drift). If you
-change a salt or the EntryPoint in one file, change it in the other.
+construction (factory args = `abi.encode(entryPoint, predictedVerifier, predictedSphincsVerifier)`),
+and the same post-deploy assertions (`VERIFIER()`, `SPHINCS_VERIFIER()`, `ENTRY_POINT()`,
+address drift). If you change a salt or the EntryPoint in one file, change it in the other.

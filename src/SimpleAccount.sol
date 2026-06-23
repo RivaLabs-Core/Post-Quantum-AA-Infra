@@ -25,7 +25,8 @@ import {SPHINCS_SIG_LEN} from "./Verifiers/SphincsVerifier.sol";
 ///           activation   = [version(1)][proofLen(2)][Merkle proof][FORS blob]   (!activated)
 ///           SPHINCS-     = [SPHINCS_SIG_LEN bytes SPHINCS- blob]                 (either state)
 ///         The three length classes are kept disjoint (constructor guard).
-///         userOp.callData  = [... any call ...][20 bytes nextOwner]
+///         userOp.callData  = [... any call ...][20 bytes nextOwner]                      (FORS / activation)
+///                          = [... any call ...][20 bytes currentKey][20 bytes nextOwner] (SPHINCS-)
 contract SimpleAccount is BaseAccount, TokenCallbackHandler, Initializable {
     // version(1) + proofLen(2)
     uint256 private constant ACTIVATION_HEADER_LENGTH = 3;
@@ -120,10 +121,11 @@ contract SimpleAccount is BaseAccount, TokenCallbackHandler, Initializable {
         address nextOwner = address(bytes20(userOp.callData[userOp.callData.length - 20:]));
 
         // SPHINCS- backup path: routed purely by length, verified against the committed backup key,
-        // valid in BOTH the inactive (cross-chain bootstrap) and active states. Co-equal — it
-        // authorizes any op; a new device is enrolled by the op's callData calling addSigner().
+        // valid in BOTH the inactive (cross-chain bootstrap) and active (recovery) states. It rotates
+        // the FORS owner exactly like a FORS op — its callData carries [currentKey][nextOwner] — so a
+        // backup signature re-seeds the rotating chain (burns currentKey, activates nextOwner).
         if (userOp.signature.length == SPHINCS_SIG_LEN) {
-            return _validateSphincsSignature(userOp.signature, userOpHash);
+            return _validateSphincsSignature(userOp.signature, userOpHash, userOp.callData, nextOwner);
         }
 
         if (!activated) {
@@ -195,18 +197,28 @@ contract SimpleAccount is BaseAccount, TokenCallbackHandler, Initializable {
     }
 
     /// @dev SPHINCS- backup verification (co-equal, durable). A valid signature over `userOpHash`
-    ///      against the committed backup key authorizes the op. It performs no authState mutation and
-    ///      never rotates — the backup key is a static parallel authority; to enroll a device the op's
-    ///      callData calls addSigner(). Length is guaranteed == SPHINCS_SIG_LEN and the stored key is
-    ///      canonical (see initialize), so verify() returns a bool and never reverts.
-    function _validateSphincsSignature(bytes calldata signature, bytes32 userOpHash)
-        internal
-        returns (uint256 validationData)
-    {
+    ///      against the committed backup key authorizes the op and rotates the FORS owner exactly like
+    ///      a FORS op: the callData tail carries [currentKey][nextOwner], and _rotate burns currentKey
+    ///      (even though it never signed) and activates nextOwner — re-seeding the chain for recovery.
+    ///      The backup key itself is never rotated. Also flips `activated` so a pre-activation SPHINCS-
+    ///      op can bootstrap the account on chains absent from the Merkle tree. Length is guaranteed
+    ///      == SPHINCS_SIG_LEN and the stored key is canonical, so verify() returns a bool, never reverts.
+    function _validateSphincsSignature(
+        bytes calldata signature,
+        bytes32 userOpHash,
+        bytes calldata callData,
+        address nextOwner
+    ) internal returns (uint256 validationData) {
+        require(callData.length >= 44, "SimpleAccount: missing rotation keys"); // 4 selector + 20 current + 20 next
+        address currentKey = address(bytes20(callData[callData.length - 40:callData.length - 20]));
+
         if (!SPHINCS_VERIFIER.verify(backupPkSeed, backupPkRoot, userOpHash, signature)) {
             return SIG_VALIDATION_FAILED;
         }
+
         emit BackupSignerUsed(userOpHash);
+        if (!activated) activated = true;
+        _rotate(currentKey, nextOwner);
         return SIG_VALIDATION_SUCCESS;
     }
 
