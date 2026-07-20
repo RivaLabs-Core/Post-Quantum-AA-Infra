@@ -2,7 +2,7 @@
  * Gasless multi-chain infra deploy via ERC-4337 + Pimlico.
  *
  * This is the account-abstraction sibling of `script/Deploy.s.sol`. It deploys
- * the same three contracts — ForsVerifier, SphincsVerifier and SimpleAccountFactory — to the same
+ * the same three contracts — ForsVerifier, SphincsParamVerifier and SimpleAccountFactory — to the same
  * deterministic addresses, but instead of an EOA `forge` broadcast it has a
  * smart account CALL the canonical CREATE2 deployer (0x4e59…4956C) inside a
  * Pimlico-sponsored UserOperation. No native token is needed on the deployer.
@@ -52,7 +52,7 @@ const DEFAULT_ENTRYPOINT: Address = '0x0000000071727De22E5E9d8BAf0edAc6f37da032'
 // keccak256 of the verifier/factory salt strings. Pinned from `cast keccak` so a TS keccak/encoding
 // mismatch fails loudly here instead of silently deploying to the wrong addresses.
 const EXPECTED_FORS_SALT: Hex = '0x1891551135aa6aebbd0237cb36dd6bfc9cb284420e866248f2a7592bc01895e7'
-const EXPECTED_SPHINCS_SALT: Hex = '0x3ff6a18c6450afcde5a54133d0eb9ca318254e31b2118aac4741ea18b8a7d0b3'
+const EXPECTED_SPHINCS_SALT: Hex = '0x04011f525b81fa97e4cb35c8b52d5b6a8ab40508250c543260581465dd47453d'
 const EXPECTED_FACTORY_SALT: Hex = '0x86c6c38223aead0d46ad82406622f80d6eb574af29de7f40040b6e5e96765f49'
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
@@ -61,7 +61,7 @@ const REPO_ROOT = resolve(SCRIPT_DIR, '..')
 // Minimal read ABI for the post-deploy wiring checks (mirrors Deploy.s.sol asserts).
 const FACTORY_READ_ABI = [
   { type: 'function', name: 'VERIFIER', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] },
-  { type: 'function', name: 'SPHINCS_VERIFIER', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] },
+  { type: 'function', name: 'SPHINCS_PARAM_VERIFIER', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] },
   { type: 'function', name: 'ENTRY_POINT', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] },
   { type: 'function', name: 'ACCOUNT_IMPL', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] },
 ] as const
@@ -135,7 +135,7 @@ async function main() {
     : keccak256(toBytes('NiceTry.ForsVerifier.v1'))
   const sphincsSalt: Hex = env('SPHINCS_VERIFIER_SALT')
     ? asHex(requireEnv('SPHINCS_VERIFIER_SALT'))
-    : keccak256(toBytes('NiceTry.SphincsVerifier.v1'))
+    : keccak256(toBytes('NiceTry.SphincsParamVerifier.v1'))
   const factorySalt: Hex = env('FACTORY_SALT')
     ? asHex(requireEnv('FACTORY_SALT'))
     : keccak256(toBytes('NiceTry.SimpleAccountFactory.v1'))
@@ -155,7 +155,7 @@ async function main() {
   const forsInitCode = loadCreationCode(resolve(REPO_ROOT, 'out/ForsVerifier.sol/ForsVerifier.json'))
   const predictedVerifier = getCreate2Address({ from: CREATE2_DEPLOYER, salt: forsSalt, bytecode: forsInitCode })
 
-  const sphincsInitCode = loadCreationCode(resolve(REPO_ROOT, 'out/SphincsVerifier.sol/SphincsVerifier.json'))
+  const sphincsInitCode = loadCreationCode(resolve(REPO_ROOT, 'out/SphincsParamVerifier.sol/SphincsParamVerifier.json'))
   const predictedSphincsVerifier = getCreate2Address({ from: CREATE2_DEPLOYER, salt: sphincsSalt, bytecode: sphincsInitCode })
 
   const factoryCreationCode = loadCreationCode(resolve(REPO_ROOT, 'out/SimpleAccountFactory.sol/SimpleAccountFactory.json'))
@@ -171,7 +171,7 @@ async function main() {
   console.log('EntryPoint         :', entryPoint)
   console.log('CREATE2 deployer   :', CREATE2_DEPLOYER)
   console.log('ForsVerifier salt  :', forsSalt)
-  console.log('SphincsVerifier salt:', sphincsSalt)
+  console.log('SphincsParamVerifier salt:', sphincsSalt)
   console.log('Factory salt       :', factorySalt)
   console.log('Predicted verifier :', predictedVerifier)
   console.log('Predicted sphincs  :', predictedSphincsVerifier)
@@ -215,7 +215,7 @@ async function main() {
   if (await hasCode(predictedVerifier)) console.log('• ForsVerifier already deployed — skipping')
   else calls.push({ to: CREATE2_DEPLOYER, value: 0n, data: concatHex([forsSalt, forsInitCode]) })
 
-  if (await hasCode(predictedSphincsVerifier)) console.log('• SphincsVerifier already deployed — skipping')
+  if (await hasCode(predictedSphincsVerifier)) console.log('• SphincsParamVerifier already deployed — skipping')
   else calls.push({ to: CREATE2_DEPLOYER, value: 0n, data: concatHex([sphincsSalt, sphincsInitCode]) })
 
   if (await hasCode(predictedFactory)) console.log('• SimpleAccountFactory already deployed — skipping')
@@ -267,12 +267,12 @@ async function main() {
 
   // ----- post-deploy verification (mirrors Deploy.s.sol require()s) -----
   if (!(await hasCode(predictedVerifier))) throw new Error('ForsVerifier missing after deploy')
-  if (!(await hasCode(predictedSphincsVerifier))) throw new Error('SphincsVerifier missing after deploy')
+  if (!(await hasCode(predictedSphincsVerifier))) throw new Error('SphincsParamVerifier missing after deploy')
   if (!(await hasCode(predictedFactory))) throw new Error('SimpleAccountFactory missing after deploy')
 
   const [wiredVerifier, wiredSphincs, wiredEntryPoint, accountImpl] = await Promise.all([
     publicClient.readContract({ address: predictedFactory, abi: FACTORY_READ_ABI, functionName: 'VERIFIER' }),
-    publicClient.readContract({ address: predictedFactory, abi: FACTORY_READ_ABI, functionName: 'SPHINCS_VERIFIER' }),
+    publicClient.readContract({ address: predictedFactory, abi: FACTORY_READ_ABI, functionName: 'SPHINCS_PARAM_VERIFIER' }),
     publicClient.readContract({ address: predictedFactory, abi: FACTORY_READ_ABI, functionName: 'ENTRY_POINT' }),
     publicClient.readContract({ address: predictedFactory, abi: FACTORY_READ_ABI, functionName: 'ACCOUNT_IMPL' }),
   ])
@@ -281,7 +281,7 @@ async function main() {
     throw new Error(`Verifier wiring mismatch: factory.VERIFIER()=${wiredVerifier} != ${predictedVerifier}`)
   }
   if (getAddress(wiredSphincs) !== getAddress(predictedSphincsVerifier)) {
-    throw new Error(`SPHINCS verifier wiring mismatch: factory.SPHINCS_VERIFIER()=${wiredSphincs} != ${predictedSphincsVerifier}`)
+    throw new Error(`SPHINCS verifier wiring mismatch: factory.SPHINCS_PARAM_VERIFIER()=${wiredSphincs} != ${predictedSphincsVerifier}`)
   }
   if (getAddress(wiredEntryPoint) !== getAddress(entryPoint)) {
     throw new Error(`EntryPoint wiring mismatch: factory.ENTRY_POINT()=${wiredEntryPoint} != ${entryPoint}`)
@@ -289,7 +289,7 @@ async function main() {
 
   console.log('\n✓ Deployed & verified on chain', chainId)
   console.log('ForsVerifier         :', predictedVerifier)
-  console.log('SphincsVerifier      :', predictedSphincsVerifier)
+  console.log('SphincsParamVerifier :', predictedSphincsVerifier)
   console.log('SimpleAccountFactory :', predictedFactory)
   console.log('Account implementation:', accountImpl)
 }

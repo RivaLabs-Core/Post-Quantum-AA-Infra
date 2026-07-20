@@ -4,9 +4,9 @@ pragma solidity ^0.8.24;
 import "forge-std/Script.sol";
 import "../src/SimpleAccountFactory.sol";
 import "../src/Verifiers/ForsVerifier.sol";
-import "../src/Verifiers/SphincsVerifier.sol";
+import "../src/Verifiers/SphincsParamVerifier.sol";
 import {ISignatureVerifier} from "../src/Interfaces/ISignatureVerifier.sol";
-import {ISphincsVerifier} from "../src/Interfaces/ISphincsVerifier.sol";
+import {ISphincsParamVerifier} from "../src/Interfaces/ISphincsParamVerifier.sol";
 import {IEntryPoint} from "account-abstraction/interfaces/IEntryPoint.sol";
 
 contract Deploy is Script {
@@ -14,7 +14,7 @@ contract Deploy is Script {
     address constant CREATE2_DEPLOYER = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
 
     bytes32 constant DEFAULT_FORS_VERIFIER_SALT = keccak256("NiceTry.ForsVerifier.v1");
-    bytes32 constant DEFAULT_SPHINCS_VERIFIER_SALT = keccak256("NiceTry.SphincsVerifier.v1");
+    bytes32 constant DEFAULT_SPHINCS_VERIFIER_SALT = keccak256("NiceTry.SphincsParamVerifier.v1");
     bytes32 constant DEFAULT_FACTORY_SALT = keccak256("NiceTry.SimpleAccountFactory.v1");
 
     function run() external {
@@ -28,7 +28,7 @@ contract Deploy is Script {
         bytes memory forsVerifierInitCode = type(ForsVerifier).creationCode;
         address predictedForsVerifier = _predictDeterministicAddress(forsVerifierSalt, forsVerifierInitCode);
 
-        bytes memory sphincsVerifierInitCode = type(SphincsVerifier).creationCode;
+        bytes memory sphincsVerifierInitCode = type(SphincsParamVerifier).creationCode;
         address predictedSphincsVerifier = _predictDeterministicAddress(sphincsVerifierSalt, sphincsVerifierInitCode);
 
         bytes memory factoryInitCode = abi.encodePacked(
@@ -36,7 +36,7 @@ contract Deploy is Script {
             abi.encode(
                 IEntryPoint(entryPoint),
                 ISignatureVerifier(predictedForsVerifier),
-                ISphincsVerifier(predictedSphincsVerifier)
+                ISphincsParamVerifier(predictedSphincsVerifier)
             )
         );
         address predictedFactory = _predictDeterministicAddress(factorySalt, factoryInitCode);
@@ -51,24 +51,27 @@ contract Deploy is Script {
 
         SimpleAccountFactory factory = SimpleAccountFactory(factoryAddr);
 
-        console.log("CREATE2 deployer:           ", CREATE2_DEPLOYER);
-        console.log("ForsVerifier salt:          ");
+        console.log("CREATE2 deployer:                ", CREATE2_DEPLOYER);
+        console.log("ForsVerifier salt:               ");
         console.logBytes32(forsVerifierSalt);
-        console.log("SphincsVerifier salt:       ");
+        console.log("SphincsParamVerifier salt:       ");
         console.logBytes32(sphincsVerifierSalt);
-        console.log("Factory salt:               ");
+        console.log("Factory salt:                    ");
         console.logBytes32(factorySalt);
-        console.log("ForsVerifier deployed at:   ", forsVerifier);
-        console.log("SphincsVerifier deployed at:", sphincsVerifier);
-        console.log("Factory deployed at:        ", factoryAddr);
-        console.log("Account implementation at: ", factory.ACCOUNT_IMPL());
-        console.log("EntryPoint:                 ", entryPoint);
+        console.log("ForsVerifier deployed at:        ", forsVerifier);
+        console.log("SphincsParamVerifier deployed at:", sphincsVerifier);
+        console.log("Factory deployed at:             ", factoryAddr);
+        console.log("Account implementation at:       ", factory.ACCOUNT_IMPL());
+        console.log("EntryPoint:                      ", entryPoint);
 
         require(forsVerifier == predictedForsVerifier, "Deploy: verifier address drift");
         require(sphincsVerifier == predictedSphincsVerifier, "Deploy: sphincs verifier address drift");
         require(factoryAddr == predictedFactory, "Deploy: factory address drift");
         require(factory.VERIFIER() == ISignatureVerifier(forsVerifier), "Deploy: verifier mismatch");
-        require(factory.SPHINCS_VERIFIER() == ISphincsVerifier(sphincsVerifier), "Deploy: sphincs verifier mismatch");
+        require(
+            factory.SPHINCS_PARAM_VERIFIER() == ISphincsParamVerifier(sphincsVerifier),
+            "Deploy: sphincs verifier mismatch"
+        );
         require(factory.ENTRY_POINT() == IEntryPoint(entryPoint), "Deploy: EntryPoint mismatch");
     }
 

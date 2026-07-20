@@ -1,7 +1,7 @@
 # deploy-4337 — gasless infra deploy via ERC-4337 + Pimlico
 
 The account-abstraction sibling of [`script/Deploy.s.sol`](../script/Deploy.s.sol).
-It deploys the same three infra contracts — `ForsVerifier`, `SphincsVerifier`, and
+It deploys the same three infra contracts — `ForsVerifier`, `SphincsParamVerifier`, and
 `SimpleAccountFactory` — to the **same deterministic addresses**, but pays for gas
 through a Pimlico paymaster instead of native token on the deployer EOA.
 
@@ -88,5 +88,5 @@ the predicted addresses are unchanged.
 
 Same constants (CREATE2 deployer, EntryPoint v0.7, salt strings), same initcode
 construction (factory args = `abi.encode(entryPoint, predictedVerifier, predictedSphincsVerifier)`),
-and the same post-deploy assertions (`VERIFIER()`, `SPHINCS_VERIFIER()`, `ENTRY_POINT()`,
+and the same post-deploy assertions (`VERIFIER()`, `SPHINCS_PARAM_VERIFIER()`, `ENTRY_POINT()`,
 address drift). If you change a salt or the EntryPoint in one file, change it in the other.
