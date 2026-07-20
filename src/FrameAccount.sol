@@ -14,9 +14,15 @@ import {FORS_SIG_LEN} from "./Verifiers/ForsVerifier.sol";
 abstract contract FrameAccount {
     uint256 internal constant FRAME_MODE_SENDER = 2;
     uint256 internal constant ATOMIC_BATCH_FLAG = 1 << 2;
-    uint256 internal constant ROTATE_OWNER_CALLDATA_LENGTH = 4 + 32;
+    // selector(4) + currentKey(32) + nextOwner(32)
+    uint256 internal constant ROTATE_OWNER_CALLDATA_LENGTH = 4 + 32 + 32;
 
-    address public owner;
+    uint8 internal constant AUTH_NONE = 0; // never authorized
+    uint8 internal constant AUTH_ACTIVE = 1; // authorized, may sign exactly one frame
+    uint8 internal constant AUTH_BURNED = 2; // already used, never valid again
+
+    /// @notice Per-signer authorization state. Each device runs its own key chain.
+    mapping(address => uint8) public authState;
     ISignatureVerifier public immutable VERIFIER;
 
     event FrameAccountInitialized(address indexed owner, address indexed verifier);
@@ -26,7 +32,9 @@ abstract contract FrameAccount {
     error FrameAccountZeroVerifier();
     error FrameAccountNotSelf();
     error FrameAccountBadSignatureLength(uint256 length);
-    error FrameAccountInvalidSignature(address recovered, address expected);
+    error FrameAccountInvalidSignature(address recovered);
+    error FrameAccountKeyNotActive(address key);
+    error FrameAccountNextOwnerNotFresh(address nextOwner);
     error FrameAccountMissingRotationFrame(uint256 currentFrame, uint256 frameCount);
     error FrameAccountRotationFrameWrongMode(uint256 frameIndex, uint256 mode);
     error FrameAccountRotationFrameWrongTarget(uint256 frameIndex, address target);
@@ -34,13 +42,14 @@ abstract contract FrameAccount {
     error FrameAccountRotationFrameAtomic(uint256 frameIndex);
     error FrameAccountRotationFrameWrongDataLength(uint256 frameIndex, uint256 length);
     error FrameAccountRotationFrameWrongSelector(uint256 frameIndex, bytes4 selector);
+    error FrameAccountRotationFrameWrongCurrent(uint256 frameIndex, address currentKey);
     error FrameAccountRotationFrameZeroOwner(uint256 frameIndex);
 
     constructor(address initialOwner, ISignatureVerifier verifier) {
         if (initialOwner == address(0)) revert FrameAccountZeroOwner();
         if (address(verifier) == address(0)) revert FrameAccountZeroVerifier();
 
-        owner = initialOwner;
+        authState[initialOwner] = AUTH_ACTIVE;
         VERIFIER = verifier;
 
         emit FrameAccountInitialized(initialOwner, address(verifier));
@@ -53,26 +62,36 @@ abstract contract FrameAccount {
     }
 
     /// @notice Dedicated rotation entry point to be called by the required SENDER frame.
-    function rotateOwner(address nextOwner) external {
+    ///         Carries the current (signing) key so the burn binds to the signer that the
+    ///         VERIFY frame authenticated; all state changes happen here, in the rotate frame.
+    function rotateOwner(address currentKey, address nextOwner) external {
         _requireSelf();
-        _rotateOwner(nextOwner);
+        _rotateOwner(currentKey, nextOwner);
     }
 
     /// @notice Validation of the FORS signature + require the next frame to be exclusively a call to rotateOwner().
+    /// @dev Side-effect-free: it only verifies the signer is active and that the next frame
+    ///      will burn exactly that signer and activate a fresh key. State changes happen in
+    ///      the SENDER rotateOwner frame.
     function _validateFrameSignature(bytes calldata signature) internal view virtual {
         if (signature.length != FORS_SIG_LEN) revert FrameAccountBadSignatureLength(signature.length);
 
         bytes32 sigHash = _txSigHash();
         address recovered = VERIFIER.recover(signature, sigHash);
 
-        if (recovered == address(0) || recovered != owner) {
-            revert FrameAccountInvalidSignature(recovered, owner);
+        if (recovered == address(0) || authState[recovered] != AUTH_ACTIVE) {
+            revert FrameAccountInvalidSignature(recovered);
         }
 
-        _requireNextFrameRotatesOwner();
+        _requireNextFrameRotatesOwner(recovered);
     }
 
-    function _requireNextFrameRotatesOwner() internal view virtual returns (address nextOwner) {
+    function _requireNextFrameRotatesOwner(address expectedCurrent)
+        internal
+        view
+        virtual
+        returns (address nextOwner)
+    {
         uint256 currentFrame = _currentFrameIndex();
         uint256 frameCount = _frameCount();
         uint256 rotationFrame = currentFrame + 1;
@@ -111,19 +130,28 @@ abstract contract FrameAccount {
             revert FrameAccountRotationFrameWrongSelector(rotationFrame, selector);
         }
 
-        nextOwner = address(uint160(uint256(_frameDataLoad(rotationFrame, 4))));
+        address currentKey = address(uint160(uint256(_frameDataLoad(rotationFrame, 4))));
+        if (currentKey != expectedCurrent) {
+            revert FrameAccountRotationFrameWrongCurrent(rotationFrame, currentKey);
+        }
+
+        nextOwner = address(uint160(uint256(_frameDataLoad(rotationFrame, 36))));
         if (nextOwner == address(0)) {
             revert FrameAccountRotationFrameZeroOwner(rotationFrame);
         }
     }
 
-    function _rotateOwner(address nextOwner) internal {
+    /// @dev All authorization-state mutation lives here, in the rotate frame: burn the
+    ///      signing key and activate the fresh next key.
+    function _rotateOwner(address currentKey, address nextOwner) internal {
         if (nextOwner == address(0)) revert FrameAccountZeroOwner();
+        if (authState[currentKey] != AUTH_ACTIVE) revert FrameAccountKeyNotActive(currentKey);
+        if (authState[nextOwner] != AUTH_NONE) revert FrameAccountNextOwnerNotFresh(nextOwner);
 
-        address previousOwner = owner;
-        owner = nextOwner;
+        authState[currentKey] = AUTH_BURNED;
+        authState[nextOwner] = AUTH_ACTIVE;
 
-        emit OwnerRotated(previousOwner, nextOwner);
+        emit OwnerRotated(currentKey, nextOwner);
     }
 
     function _requireSelf() internal view {

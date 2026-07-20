@@ -17,8 +17,10 @@ broadcast/
 docs/*
 !docs/fors-parameters.md
 !docs/fors-two-forest-cache.md
-!docs/signing-spec.node_modules
+!docs/signing-spec.md
 !docs/frame-rotation-validation.md
+!docs/sphincs-backup-recovery.md
+!docs/sphincs-indexed-signing.md
 
 images/
 
@@ -35,3 +37,7 @@ abi/
 verity/.lake/
 
 images/
+
+# Deploy runbook + packaged artifacts (local)
+/DEPLOY_PROCESS.md
+dist/
