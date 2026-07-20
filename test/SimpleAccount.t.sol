@@ -5,7 +5,8 @@ import "forge-std/Test.sol";
 import "../src/SimpleAccount.sol";
 import "../src/SimpleAccountFactory.sol";
 import {ISignatureVerifier} from "../src/Interfaces/ISignatureVerifier.sol";
-import {ISphincsVerifier} from "../src/Interfaces/ISphincsVerifier.sol";
+import {ISphincsParamVerifier} from "../src/Interfaces/ISphincsParamVerifier.sol";
+import {SphincsParamsLib} from "../src/Verifiers/SphincsParamsLib.sol";
 import {FORS_SIG_LEN} from "../src/Verifiers/ForsVerifier.sol";
 import {SPHINCS_SIG_LEN} from "../src/Verifiers/SphincsVerifier.sol";
 import {IEntryPoint} from "account-abstraction/interfaces/IEntryPoint.sol";
@@ -25,15 +26,42 @@ contract MockSignatureVerifier is ISignatureVerifier {
     }
 }
 
-/// @dev Mock SPHINCS- verifier - test pre-sets the bool verify() should return.
-contract MockSphincsVerifier is ISphincsVerifier {
+/// @dev Mock parametric SPHINCS- verifier - test pre-sets the bool verify() should return.
+///      With expect(...) armed it additionally returns true ONLY when the account passed exactly
+///      the expected (pkSeed, pkRoot, packedParams, blob length) — proving envelope slicing and
+///      per-signer param plumbing.
+contract MockSphincsParamVerifier is ISphincsParamVerifier {
     bool public _valid;
+    bool internal _checkArgs;
+    bytes32 internal _expSeed;
+    bytes32 internal _expRoot;
+    uint256 internal _expPacked;
+    uint256 internal _expBlobLen;
 
     function setValid(bool v) external {
         _valid = v;
+        _checkArgs = false;
     }
 
-    function verify(bytes32, bytes32, bytes32, bytes calldata) external view returns (bool) {
+    function expect(bytes32 pkSeed, bytes32 pkRoot, uint256 packedParams, uint256 blobLen) external {
+        _valid = true;
+        _checkArgs = true;
+        _expSeed = pkSeed;
+        _expRoot = pkRoot;
+        _expPacked = packedParams;
+        _expBlobLen = blobLen;
+    }
+
+    function verify(bytes32 pkSeed, bytes32 pkRoot, bytes32, uint256 packedParams, bytes calldata sig)
+        external
+        view
+        returns (bool)
+    {
+        if (_checkArgs) {
+            if (pkSeed != _expSeed || pkRoot != _expRoot || packedParams != _expPacked || sig.length != _expBlobLen) {
+                return false;
+            }
+        }
         return _valid;
     }
 }
@@ -45,14 +73,17 @@ contract SimpleAccountTest is Test {
     uint256 internal constant ACTIVATION_TREE_LEAF_COUNT = 256;
     uint256 internal constant ACTIVATION_TREE_DEPTH = 8;
 
-    // Canonical (top-128-bit-aligned, low 128 bits zero) SPHINCS- backup public key for tests.
+    // Canonical (top-128-bit-aligned, low 128 bits zero) SPHINCS- backup public keys for tests.
     bytes32 internal constant BACKUP_PK_SEED = bytes32(uint256(0xB1B1B1B1B1B1B1B1B1B1B1B1B1B1B1B1) << 128);
     bytes32 internal constant BACKUP_PK_ROOT = bytes32(uint256(0xB2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2) << 128);
+    // A second, post-deploy-enrolled SPHINCS- key (the "lightweight" signer in these tests).
+    bytes32 internal constant PK_SEED_2 = bytes32(uint256(0xC1C1C1C1C1C1C1C1C1C1C1C1C1C1C1C1) << 128);
+    bytes32 internal constant PK_ROOT_2 = bytes32(uint256(0xC2C2C2C2C2C2C2C2C2C2C2C2C2C2C2C2) << 128);
 
     SimpleAccountFactory factory;
     SimpleAccount account;
     MockSignatureVerifier verifier;
-    MockSphincsVerifier sphincsVerifier;
+    MockSphincsParamVerifier sphincsVerifier;
     IEntryPoint entryPoint;
 
     address initialOwner = makeAddr("initialForsOwner");
@@ -76,13 +107,19 @@ contract SimpleAccountTest is Test {
         (initialSignerRoot, activationProof) = _buildActivationTree();
 
         verifier = new MockSignatureVerifier();
-        sphincsVerifier = new MockSphincsVerifier();
+        sphincsVerifier = new MockSphincsParamVerifier();
         factory = new SimpleAccountFactory(entryPoint, verifier, sphincsVerifier);
 
         address accountAddr = factory.createAccount(initialSignerRoot, BACKUP_PK_SEED, BACKUP_PK_ROOT, 0);
         account = SimpleAccount(payable(accountAddr));
 
         vm.deal(address(account), 100 ether);
+    }
+
+    /// @dev The "lightweight" second parameter set used across the multi-signer tests
+    ///      (blob 3060 bytes, envelope 3124 — disjoint from every reserved length class).
+    function _lightParams() internal pure returns (SphincsParamsLib.Params memory) {
+        return SphincsParamsLib.Params({h: 8, d: 1, k: 10, a: 12, logW: 4, l: 64, targetSum: 480});
     }
 
     // =========================================================================
@@ -94,9 +131,11 @@ contract SimpleAccountTest is Test {
         assertEq(account.initialSignerRoot(), initialSignerRoot);
         assertEq(address(account.ENTRY_POINT()), ENTRYPOINT);
         assertEq(address(account.VERIFIER()), address(verifier));
-        assertEq(address(account.SPHINCS_VERIFIER()), address(sphincsVerifier));
-        assertEq(account.backupPkSeed(), BACKUP_PK_SEED);
-        assertEq(account.backupPkRoot(), BACKUP_PK_ROOT);
+        assertEq(address(account.SPHINCS_PARAM_VERIFIER()), address(sphincsVerifier));
+        // The CREATE2-committed backup key is registered with the canonical parameter set.
+        _assertRegisteredParams(
+            account.sphincsSignerId(BACKUP_PK_SEED, BACKUP_PK_ROOT), SphincsParamsLib.canonical()
+        );
     }
 
     function test_cannotReinitialize() public {
@@ -192,6 +231,15 @@ contract SimpleAccountTest is Test {
         assertEq(r, 1);
         assertFalse(account.activated());
         assertEq(account.authState(owner0), 0);
+    }
+
+    /// @dev With SPHINCS- signers registered, an activation envelope must still route to the
+    ///      activation path: its first 64 bytes never match a registered key head.
+    function test_activation_notShadowedByRegisteredSigners() public {
+        vm.prank(ENTRYPOINT);
+        account.addSphincsSigner(PK_SEED_2, PK_ROOT_2, _lightParams());
+
+        test_validActivation_rotatesOwner();
     }
 
     // =========================================================================
@@ -378,7 +426,7 @@ contract SimpleAccountTest is Test {
     }
 
     // =========================================================================
-    // SPHINCS- backup signer (co-equal, length-dispatched, rotates the FORS owner)
+    // SPHINCS- backup signers (co-equal, key-head-dispatched, rotate the FORS owner)
     // =========================================================================
 
     /// @dev A SPHINCS- op carries [execute][currentKey][nextOwner] and rotates the FORS owner
@@ -387,7 +435,7 @@ contract SimpleAccountTest is Test {
         _activateTo(owner0);
         sphincsVerifier.setValid(true);
         bytes memory callData = _execCalldata2(recipient, 0, "", owner0, owner1);
-        PackedUserOperation memory op = _userOp(callData, _sphincsBlob());
+        PackedUserOperation memory op = _userOp(callData, _backupEnvelope());
 
         vm.prank(ENTRYPOINT);
         uint256 r = account.validateUserOp(op, keccak256("sphincs-op"), 0);
@@ -401,7 +449,7 @@ contract SimpleAccountTest is Test {
         _activateTo(owner0);
         sphincsVerifier.setValid(false);
         bytes memory callData = _execCalldata2(recipient, 0, "", owner0, owner1);
-        PackedUserOperation memory op = _userOp(callData, _sphincsBlob());
+        PackedUserOperation memory op = _userOp(callData, _backupEnvelope());
 
         vm.prank(ENTRYPOINT);
         uint256 r = account.validateUserOp(op, keccak256("sphincs-op"), 0);
@@ -411,28 +459,30 @@ contract SimpleAccountTest is Test {
         assertEq(account.authState(owner1), 0);
     }
 
-    function test_sphincsBackup_keyUnchangedAfterUse() public {
+    function test_sphincsBackup_keyStillRegisteredAfterUse() public {
         _activateTo(owner0);
         sphincsVerifier.setValid(true);
         bytes memory callData = _execCalldata2(recipient, 0, "", owner0, owner1);
-        PackedUserOperation memory op = _userOp(callData, _sphincsBlob());
+        PackedUserOperation memory op = _userOp(callData, _backupEnvelope());
 
         vm.prank(ENTRYPOINT);
         account.validateUserOp(op, keccak256("sphincs-op"), 0);
 
-        // The backup key is the static parallel authority — never rotated/consumed.
-        assertEq(account.backupPkSeed(), BACKUP_PK_SEED);
-        assertEq(account.backupPkRoot(), BACKUP_PK_ROOT);
+        // Backup keys are the static parallel authority — never rotated/consumed by use.
+        _assertRegisteredParams(
+            account.sphincsSignerId(BACKUP_PK_SEED, BACKUP_PK_ROOT), SphincsParamsLib.canonical()
+        );
     }
 
-    /// @dev A SPHINCS_SIG_LEN blob must route to the SPHINCS- verifier even when the FORS verifier
-    ///      would accept — proving dispatch is by length, not by which verifier happens to say yes.
-    function test_lengthDispatch_sphincsLenRoutesToSphincs() public {
+    /// @dev A registered-key envelope must route to the SPHINCS- verifier even when the FORS
+    ///      verifier would accept — proving dispatch is by registered key head, not by which
+    ///      verifier happens to say yes.
+    function test_dispatch_registeredHeadRoutesToSphincs() public {
         _activateTo(owner0);
         verifier.setRecovered(owner0); // FORS would accept
         sphincsVerifier.setValid(false); // SPHINCS- rejects
         bytes memory callData = _execCalldata2(recipient, 0, "", owner0, owner1);
-        PackedUserOperation memory op = _userOp(callData, _sphincsBlob());
+        PackedUserOperation memory op = _userOp(callData, _backupEnvelope());
 
         vm.prank(ENTRYPOINT);
         uint256 r = account.validateUserOp(op, keccak256("sphincs-op"), 0);
@@ -441,13 +491,47 @@ contract SimpleAccountTest is Test {
         assertEq(account.authState(owner0), 1);
     }
 
+    /// @dev A registered key head with a wrong-length blob is a FAILED signature — the op has
+    ///      committed to the SPHINCS- route and must not fall through to FORS/activation.
+    function test_dispatch_registeredHeadWrongLengthFails() public {
+        _activateTo(owner0);
+        sphincsVerifier.setValid(true); // even a lying verifier can't be reached
+        verifier.setRecovered(owner0); // and FORS would accept if it fell through
+        bytes memory callData = _execCalldata2(recipient, 0, "", owner0, owner1);
+        bytes memory sig = abi.encodePacked(BACKUP_PK_SEED, BACKUP_PK_ROOT, new bytes(SPHINCS_SIG_LEN - 1));
+        PackedUserOperation memory op = _userOp(callData, sig);
+
+        vm.prank(ENTRYPOINT);
+        uint256 r = account.validateUserOp(op, keccak256("sphincs-op"), 0);
+
+        assertEq(r, 1);
+        assertEq(account.authState(owner0), 1);
+        assertEq(account.authState(owner1), 0);
+    }
+
+    /// @dev An unregistered key head falls through and fails as a malformed FORS sig; nothing changes.
+    function test_dispatch_unregisteredHeadFallsThrough() public {
+        _activateTo(owner0);
+        sphincsVerifier.setValid(true); // must never be consulted
+        bytes memory callData = _execCalldata2(recipient, 0, "", owner0, owner1);
+        bytes memory sig = abi.encodePacked(PK_SEED_2, PK_ROOT_2, new bytes(SPHINCS_SIG_LEN));
+        PackedUserOperation memory op = _userOp(callData, sig);
+
+        vm.prank(ENTRYPOINT);
+        uint256 r = account.validateUserOp(op, keccak256("sphincs-op"), 0);
+
+        assertEq(r, 1);
+        assertEq(account.authState(owner0), 1);
+        assertEq(account.authState(owner1), 0);
+    }
+
     /// @dev Cross-chain bootstrap: pre-activation a SPHINCS- op rotates in the first FORS owner
     ///      (currentKey can be a throwaway since none exists yet) and flips activated.
     function test_sphincsBootstrapRotates() public {
         assertFalse(account.activated());
         sphincsVerifier.setValid(true);
         bytes memory callData = _execCalldata2(recipient, 0, "", address(0), owner0);
-        PackedUserOperation memory op = _userOp(callData, _sphincsBlob());
+        PackedUserOperation memory op = _userOp(callData, _backupEnvelope());
 
         vm.prank(ENTRYPOINT);
         uint256 r = account.validateUserOp(op, keccak256("bootstrap"), 0);
@@ -455,6 +539,156 @@ contract SimpleAccountTest is Test {
         assertEq(r, 0);
         assertTrue(account.activated());
         assertEq(account.authState(owner0), 1);
+    }
+
+    /// @dev The account must hand the verifier exactly the registered key, its packed params and
+    ///      the blob (envelope minus the 64-byte head) — checked by the arg-recording mock.
+    function test_sphincs_verifierReceivesRegisteredParams() public {
+        _activateTo(owner0);
+        sphincsVerifier.expect(
+            BACKUP_PK_SEED, BACKUP_PK_ROOT, SphincsParamsLib.pack(SphincsParamsLib.canonical()), SPHINCS_SIG_LEN
+        );
+        bytes memory callData = _execCalldata2(recipient, 0, "", owner0, owner1);
+        PackedUserOperation memory op = _userOp(callData, _backupEnvelope());
+
+        vm.prank(ENTRYPOINT);
+        uint256 r = account.validateUserOp(op, keccak256("sphincs-op"), 0);
+
+        assertEq(r, 0, "verifier saw unexpected key/params/blob");
+    }
+
+    // =========================================================================
+    // Multiple SPHINCS- signers: enrollment, per-signer params, removal
+    // =========================================================================
+
+    function test_addSphincsSigner_registersSecondKey() public {
+        _activateTo(owner0);
+        vm.prank(ENTRYPOINT);
+        account.addSphincsSigner(PK_SEED_2, PK_ROOT_2, _lightParams());
+
+        _assertRegisteredParams(account.sphincsSignerId(PK_SEED_2, PK_ROOT_2), _lightParams());
+        // The initial backup key is untouched.
+        _assertRegisteredParams(
+            account.sphincsSignerId(BACKUP_PK_SEED, BACKUP_PK_ROOT), SphincsParamsLib.canonical()
+        );
+    }
+
+    /// @dev An op signed with the second key must be verified with THAT key's params and length.
+    function test_secondSigner_opUsesItsOwnParams() public {
+        _activateTo(owner0);
+        vm.prank(ENTRYPOINT);
+        account.addSphincsSigner(PK_SEED_2, PK_ROOT_2, _lightParams());
+
+        uint256 blobLen = SphincsParamsLib.blobLen(_lightParams()); // 3060, != canonical 3688
+        sphincsVerifier.expect(PK_SEED_2, PK_ROOT_2, SphincsParamsLib.pack(_lightParams()), blobLen);
+
+        bytes memory callData = _execCalldata2(recipient, 0, "", owner0, owner1);
+        bytes memory sig = abi.encodePacked(PK_SEED_2, PK_ROOT_2, new bytes(blobLen));
+        PackedUserOperation memory op = _userOp(callData, sig);
+
+        vm.prank(ENTRYPOINT);
+        uint256 r = account.validateUserOp(op, keccak256("light-op"), 0);
+
+        assertEq(r, 0);
+        assertEq(account.authState(owner0), 2);
+        assertEq(account.authState(owner1), 1);
+    }
+
+    function test_addSphincsSigner_viaSelfExecute() public {
+        _activateTo(owner0);
+        bytes memory data = abi.encodeWithSelector(account.addSphincsSigner.selector, PK_SEED_2, PK_ROOT_2, _lightParams());
+        vm.prank(ENTRYPOINT);
+        account.execute(address(account), 0, data);
+
+        _assertRegisteredParams(account.sphincsSignerId(PK_SEED_2, PK_ROOT_2), _lightParams());
+    }
+
+    function test_addSphincsSigner_rejectsUnauthorizedCaller() public {
+        vm.prank(makeAddr("random"));
+        vm.expectRevert("SimpleAccount: not from EntryPoint or account");
+        account.addSphincsSigner(PK_SEED_2, PK_ROOT_2, _lightParams());
+    }
+
+    function test_addSphincsSigner_rejectsDuplicate() public {
+        vm.prank(ENTRYPOINT);
+        vm.expectRevert("SimpleAccount: sphincs signer exists");
+        account.addSphincsSigner(BACKUP_PK_SEED, BACKUP_PK_ROOT, _lightParams());
+    }
+
+    function test_addSphincsSigner_rejectsZeroKey() public {
+        vm.prank(ENTRYPOINT);
+        vm.expectRevert("SimpleAccount: zero sphincs key");
+        account.addSphincsSigner(bytes32(0), PK_ROOT_2, _lightParams());
+    }
+
+    function test_addSphincsSigner_rejectsNonCanonicalKey() public {
+        vm.prank(ENTRYPOINT);
+        vm.expectRevert("SimpleAccount: non-canonical sphincs key");
+        account.addSphincsSigner(bytes32(uint256(1)), PK_ROOT_2, _lightParams());
+    }
+
+    function test_addSphincsSigner_rejectsInvalidParams() public {
+        SphincsParamsLib.Params memory p = _lightParams();
+        p.d = 0;
+        vm.prank(ENTRYPOINT);
+        vm.expectRevert("SphincsParams: zero param");
+        account.addSphincsSigner(PK_SEED_2, PK_ROOT_2, p);
+    }
+
+    /// @dev A VALID param set whose envelope length equals FORS_SIG_LEN (64 + 2384 = 2448) must be
+    ///      rejected at registration — it could shadow the FORS route. (The set's arithmetic is
+    ///      pinned in SphincsParamsLib.t.sol.)
+    function test_addSphincsSigner_rejectsForsLengthCollision() public {
+        SphincsParamsLib.Params memory p =
+            SphincsParamsLib.Params({h: 32, d: 4, k: 7, a: 6, logW: 3, l: 18, targetSum: 63});
+        vm.prank(ENTRYPOINT);
+        vm.expectRevert("SimpleAccount: sphincs len is fors len");
+        account.addSphincsSigner(PK_SEED_2, PK_ROOT_2, p);
+    }
+
+    function test_removeSphincsSigner_removesAndOpsFail() public {
+        _activateTo(owner0);
+        address id = account.sphincsSignerId(BACKUP_PK_SEED, BACKUP_PK_ROOT);
+
+        vm.prank(ENTRYPOINT);
+        account.removeSphincsSigner(id);
+
+        (, uint8 d,,,,,) = account.sphincsSigners(id);
+        assertEq(d, 0, "params slot must be zeroed");
+
+        // A backup op with the removed key now fails (head no longer registered).
+        sphincsVerifier.setValid(true);
+        bytes memory callData = _execCalldata2(recipient, 0, "", owner0, owner1);
+        PackedUserOperation memory op = _userOp(callData, _backupEnvelope());
+
+        vm.prank(ENTRYPOINT);
+        uint256 r = account.validateUserOp(op, keccak256("sphincs-op"), 0);
+        assertEq(r, 1);
+        assertEq(account.authState(owner0), 1);
+    }
+
+    function test_removeSphincsSigner_reRegisterAfterRemove() public {
+        address id = account.sphincsSignerId(BACKUP_PK_SEED, BACKUP_PK_ROOT);
+        vm.prank(ENTRYPOINT);
+        account.removeSphincsSigner(id);
+
+        // Re-registering the same key (even with different params) is allowed once removed.
+        vm.prank(ENTRYPOINT);
+        account.addSphincsSigner(BACKUP_PK_SEED, BACKUP_PK_ROOT, _lightParams());
+        _assertRegisteredParams(id, _lightParams());
+    }
+
+    function test_removeSphincsSigner_rejectsUnknownId() public {
+        vm.prank(ENTRYPOINT);
+        vm.expectRevert("SimpleAccount: unknown sphincs signer");
+        account.removeSphincsSigner(makeAddr("neverRegistered"));
+    }
+
+    function test_removeSphincsSigner_rejectsUnauthorizedCaller() public {
+        address id = account.sphincsSignerId(BACKUP_PK_SEED, BACKUP_PK_ROOT);
+        vm.prank(makeAddr("random"));
+        vm.expectRevert("SimpleAccount: not from EntryPoint or account");
+        account.removeSphincsSigner(id);
     }
 
     // =========================================================================
@@ -534,7 +768,7 @@ contract SimpleAccountTest is Test {
 
     function test_createAccount_rejectsNonCanonicalBackupKey() public {
         bytes32 nonCanonical = bytes32(uint256(1)); // low bit set -> not top-128-aligned
-        vm.expectRevert("SimpleAccount: non-canonical backup key");
+        vm.expectRevert("SimpleAccount: non-canonical sphincs key");
         factory.createAccount(initialSignerRoot, nonCanonical, BACKUP_PK_ROOT, 7);
     }
 
@@ -587,6 +821,17 @@ contract SimpleAccountTest is Test {
     // Helpers
     // =========================================================================
 
+    function _assertRegisteredParams(address id, SphincsParamsLib.Params memory expected) internal view {
+        (uint8 h, uint8 d, uint8 k, uint8 a, uint8 logW, uint8 l, uint16 targetSum) = account.sphincsSigners(id);
+        assertEq(h, expected.h);
+        assertEq(d, expected.d);
+        assertEq(k, expected.k);
+        assertEq(a, expected.a);
+        assertEq(logW, expected.logW);
+        assertEq(l, expected.l);
+        assertEq(targetSum, expected.targetSum);
+    }
+
     function _activateTo(address nextOwner) internal {
         verifier.setRecovered(initialOwner);
         bytes memory callData = _execCalldata(recipient, 0, "", nextOwner);
@@ -622,8 +867,10 @@ contract SimpleAccountTest is Test {
         return new bytes(FORS_SIG_LEN);
     }
 
-    function _sphincsBlob() internal pure returns (bytes memory) {
-        return new bytes(SPHINCS_SIG_LEN);
+    /// @dev SPHINCS- envelope for the initialize-registered backup key (canonical params):
+    ///      [pkSeed(32)][pkRoot(32)][zeroed canonical-length blob].
+    function _backupEnvelope() internal pure returns (bytes memory) {
+        return abi.encodePacked(BACKUP_PK_SEED, BACKUP_PK_ROOT, new bytes(SPHINCS_SIG_LEN));
     }
 
     function _userOp(bytes memory callData, bytes memory sig) internal view returns (PackedUserOperation memory) {
