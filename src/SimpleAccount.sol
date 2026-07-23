@@ -12,60 +12,86 @@ import {MerkleProofLib} from "solady/utils/MerkleProofLib.sol";
 import {InitialSignerCommitment} from "./InitialSignerCommitment.sol";
 import {ISignatureVerifier} from "./Interfaces/ISignatureVerifier.sol";
 import {ISphincsVerifier} from "./Interfaces/ISphincsVerifier.sol";
+import {SPHINCS_PROFILE_COUNT, SphincsProfile, SphincsPublicKey} from "./SphincsProfiles.sol";
 import {FORS_SIG_LEN} from "./Verifiers/ForsVerifier.sol";
-import {SPHINCS_SIG_LEN} from "./Verifiers/SphincsVerifier.sol";
+import {
+    SPHINCS_DEFAULT_MINUS_SIG_LEN,
+    SPHINCS_FAST_TRADE_PLUS_SIG_LEN,
+    SPHINCS_GAS_SAVER_MINUS_Q18_AGGRESSIVE_SIG_LEN,
+    SPHINCS_PLUS_128S_SIG_LEN
+} from "./Verifiers/SphincsParameterSetVerifiers.sol";
 
 /// @title SimpleAccount
-/// @notice ERC-4337 smart account using standalone FORS as the primary signer, with a durable,
-///         co-equal SPHINCS- backup signer for recovery and cross-chain bootstrap.
+/// @notice ERC-4337 smart account using standalone FORS as the primary signer, with four durable,
+///         co-equal SPHINCS signers for recovery, trading and cross-chain bootstrap.
 ///
 ///         Signatures are dispatched purely by length (no type tag):
 ///           FORS normal  = [FORS_SIG_LEN bytes FORS blob]                       (owner != 0)
 ///           activation   = [version(1)][proofLen(2)][Merkle proof][FORS blob]   (owner == 0)
-///           SPHINCS-     = [SPHINCS_SIG_LEN bytes SPHINCS- blob]                 (either state)
-///         The three length classes are kept disjoint (constructor guard).
+///           SPHINCS      = [one of four profile-specific signature lengths]      (either state)
+///         Every signature-length class is kept disjoint (constructor guard).
 ///         userOp.callData  = [... any call ...][20 bytes nextOwner]
 contract SimpleAccount is BaseAccount, TokenCallbackHandler, Initializable {
     // version(1) + proofLen(2)
     uint256 private constant ACTIVATION_HEADER_LENGTH = 3;
     uint256 private constant MAX_ACTIVATION_PROOF_LENGTH = 64;
-    // Top-128-bit mask: SPHINCS- public-key words must be canonical (low 128 bits zero), matching
-    // the verifier's N_MASK; a non-canonical key would make verify() revert on every backup op.
-    bytes32 private constant BACKUP_PK_MASK = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF00000000000000000000000000000000;
+    // Top-128-bit mask: SPHINCS public-key words must be canonical (low 128 bits zero), matching
+    // the verifiers' N_MASK; a non-canonical key would make the selected signature path revert.
+    bytes32 private constant SPHINCS_PK_MASK = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF00000000000000000000000000000000;
 
     address public owner;
     bytes32 public initialSignerRoot;
-    // Durable SPHINCS- backup public key (chain-independent), committed into the account address via
-    // the CREATE2 salt and stored at initialize(). The key itself is never rotated.
-    bytes32 public backupPkSeed;
-    bytes32 public backupPkRoot;
+    // Profile order is fixed by SphincsProfile and is part of the CREATE2 address commitment.
+    SphincsPublicKey[SPHINCS_PROFILE_COUNT] private _sphincsKeys;
     IEntryPoint public immutable ENTRY_POINT;
     ISignatureVerifier public immutable VERIFIER;
-    ISphincsVerifier public immutable SPHINCS_VERIFIER;
+    ISphincsVerifier public immutable FAST_TRADE_PLUS_VERIFIER;
+    ISphincsVerifier public immutable DEFAULT_MINUS_VERIFIER;
+    ISphincsVerifier public immutable GAS_SAVER_MINUS_Q18_AGGRESSIVE_VERIFIER;
+    ISphincsVerifier public immutable SPHINCS_PLUS_128S_VERIFIER;
 
     event AccountInitialized(
         IEntryPoint indexed entryPoint, bytes32 indexed initialSignerRoot, address indexed verifier
     );
     event AccountActivated(bytes32 indexed initialSignerRoot, address indexed initialOwner, address indexed nextOwner);
     event OwnerRotated(address indexed previousOwner, address indexed newOwner);
-    /// @notice Emitted when a SPHINCS- backup signature authorizes an op (recovery, bootstrap, or co-equal use).
-    event BackupSignerUsed(address indexed previousOwner, address indexed nextOwner);
+    event SphincsSignerUsed(SphincsProfile indexed profile, address indexed previousOwner, address indexed nextOwner);
 
-    constructor(IEntryPoint _entryPoint, ISignatureVerifier _verifier, ISphincsVerifier _sphincsVerifier) {
+    constructor(
+        IEntryPoint _entryPoint,
+        ISignatureVerifier _verifier,
+        ISphincsVerifier _fastTradePlusVerifier,
+        ISphincsVerifier _defaultMinusVerifier,
+        ISphincsVerifier _gasSaverMinusQ18AggressiveVerifier,
+        ISphincsVerifier _sphincsPlus128sVerifier
+    ) {
         ENTRY_POINT = _entryPoint;
         VERIFIER = _verifier;
-        SPHINCS_VERIFIER = _sphincsVerifier;
+        FAST_TRADE_PLUS_VERIFIER = _fastTradePlusVerifier;
+        DEFAULT_MINUS_VERIFIER = _defaultMinusVerifier;
+        GAS_SAVER_MINUS_Q18_AGGRESSIVE_VERIFIER = _gasSaverMinusQ18AggressiveVerifier;
+        SPHINCS_PLUS_128S_VERIFIER = _sphincsPlus128sVerifier;
         owner = address(this);
 
-        // Length-dispatch disjointness invariant (see _validateSignature): the FORS, SPHINCS-, and
-        // activation-envelope length classes must never collide, else a signature could be routed to
-        // the wrong verifier. Checked once, at implementation-contract deploy time.
-        require(SPHINCS_SIG_LEN != FORS_SIG_LEN, "SimpleAccount: fors/sphincs len clash");
-        uint256 minEnvelope = ACTIVATION_HEADER_LENGTH + FORS_SIG_LEN;
         require(
-            SPHINCS_SIG_LEN < minEnvelope || (SPHINCS_SIG_LEN - minEnvelope) % 32 != 0
-                || (SPHINCS_SIG_LEN - minEnvelope) / 32 > MAX_ACTIVATION_PROOF_LENGTH,
-            "SimpleAccount: sphincs len in envelope"
+            address(_fastTradePlusVerifier) != address(0) && address(_defaultMinusVerifier) != address(0)
+                && address(_gasSaverMinusQ18AggressiveVerifier) != address(0)
+                && address(_sphincsPlus128sVerifier) != address(0),
+            "SimpleAccount: zero sphincs verifier"
+        );
+
+        _requireSphincsLengthDisjoint(SPHINCS_FAST_TRADE_PLUS_SIG_LEN);
+        _requireSphincsLengthDisjoint(SPHINCS_DEFAULT_MINUS_SIG_LEN);
+        _requireSphincsLengthDisjoint(SPHINCS_GAS_SAVER_MINUS_Q18_AGGRESSIVE_SIG_LEN);
+        _requireSphincsLengthDisjoint(SPHINCS_PLUS_128S_SIG_LEN);
+        require(
+            SPHINCS_FAST_TRADE_PLUS_SIG_LEN != SPHINCS_DEFAULT_MINUS_SIG_LEN
+                && SPHINCS_FAST_TRADE_PLUS_SIG_LEN != SPHINCS_GAS_SAVER_MINUS_Q18_AGGRESSIVE_SIG_LEN
+                && SPHINCS_FAST_TRADE_PLUS_SIG_LEN != SPHINCS_PLUS_128S_SIG_LEN
+                && SPHINCS_DEFAULT_MINUS_SIG_LEN != SPHINCS_GAS_SAVER_MINUS_Q18_AGGRESSIVE_SIG_LEN
+                && SPHINCS_DEFAULT_MINUS_SIG_LEN != SPHINCS_PLUS_128S_SIG_LEN
+                && SPHINCS_GAS_SAVER_MINUS_Q18_AGGRESSIVE_SIG_LEN != SPHINCS_PLUS_128S_SIG_LEN,
+            "SimpleAccount: sphincs len clash"
         );
 
         _disableInitializers();
@@ -76,27 +102,31 @@ contract SimpleAccount is BaseAccount, TokenCallbackHandler, Initializable {
         return ENTRY_POINT;
     }
 
-    /// @dev Called once by the factory after clone deployment. The backup key is bound into the
-    ///      account address via the CREATE2 salt (see SimpleAccountFactory + InitialSignerCommitment),
-    ///      so storing it here cannot be front-run with a different key at the same address.
-    function initialize(bytes32 _initialSignerRoot, bytes32 _backupPkSeed, bytes32 _backupPkRoot)
+    /// @dev Called once by the factory in the clone-deployment transaction. All four SPHINCS keys
+    ///      are bound into the CREATE2 salt, so the initialization cannot be front-run at this address.
+    function initialize(bytes32 _initialSignerRoot, SphincsPublicKey[SPHINCS_PROFILE_COUNT] calldata sphincsKeys)
         public
         virtual
         initializer
     {
         require(_initialSignerRoot != bytes32(0), "SimpleAccount: zero root");
-        require(_backupPkSeed != bytes32(0) && _backupPkRoot != bytes32(0), "SimpleAccount: zero backup key");
-        // Reject non-canonical backup keys up front (low 128 bits must be zero) so verify() — which
-        // reverts on non-canonical pubkeys — can never brick the backup path.
-        require(
-            _backupPkSeed == (_backupPkSeed & BACKUP_PK_MASK) && _backupPkRoot == (_backupPkRoot & BACKUP_PK_MASK),
-            "SimpleAccount: non-canonical backup key"
-        );
+        for (uint256 i = 0; i < SPHINCS_PROFILE_COUNT; i++) {
+            SphincsPublicKey calldata key = sphincsKeys[i];
+            require(key.pkSeed != bytes32(0) && key.pkRoot != bytes32(0), "SimpleAccount: zero sphincs key");
+            require(
+                key.pkSeed == (key.pkSeed & SPHINCS_PK_MASK) && key.pkRoot == (key.pkRoot & SPHINCS_PK_MASK),
+                "SimpleAccount: non-canonical sphincs key"
+            );
+            _sphincsKeys[i] = key;
+        }
         initialSignerRoot = _initialSignerRoot;
-        backupPkSeed = _backupPkSeed;
-        backupPkRoot = _backupPkRoot;
         owner = address(0);
         emit AccountInitialized(entryPoint(), _initialSignerRoot, address(VERIFIER));
+    }
+
+    function sphincsKey(SphincsProfile profile) external view returns (bytes32 pkSeed, bytes32 pkRoot) {
+        SphincsPublicKey storage key = _sphincsKeys[uint256(profile)];
+        return (key.pkSeed, key.pkRoot);
     }
 
     /// @inheritdoc BaseAccount
@@ -110,11 +140,32 @@ contract SimpleAccount is BaseAccount, TokenCallbackHandler, Initializable {
 
         address nextOwner = address(bytes20(userOp.callData[userOp.callData.length - 20:]));
 
-        // SPHINCS- backup path: routed purely by length, verified against the committed backup key,
-        // and valid in BOTH the inactive (cross-chain bootstrap) and active (recovery / co-equal)
-        // states. Fully capable — it authorizes any op and re-seeds the FORS owner to nextOwner.
-        if (userOp.signature.length == SPHINCS_SIG_LEN) {
-            return _validateSphincsSignature(userOp.signature, userOpHash, nextOwner);
+        // SPHINCS paths are valid in both inactive and active states. The four lengths are unique,
+        // so no profile byte is needed in the signature.
+        uint256 signatureLength = userOp.signature.length;
+        if (signatureLength == SPHINCS_FAST_TRADE_PLUS_SIG_LEN) {
+            return _validateSphincsSignature(
+                SphincsProfile.FastTradePlus, FAST_TRADE_PLUS_VERIFIER, userOp.signature, userOpHash, nextOwner
+            );
+        }
+        if (signatureLength == SPHINCS_DEFAULT_MINUS_SIG_LEN) {
+            return _validateSphincsSignature(
+                SphincsProfile.DefaultMinus, DEFAULT_MINUS_VERIFIER, userOp.signature, userOpHash, nextOwner
+            );
+        }
+        if (signatureLength == SPHINCS_GAS_SAVER_MINUS_Q18_AGGRESSIVE_SIG_LEN) {
+            return _validateSphincsSignature(
+                SphincsProfile.GasSaverMinusQ18Aggressive,
+                GAS_SAVER_MINUS_Q18_AGGRESSIVE_VERIFIER,
+                userOp.signature,
+                userOpHash,
+                nextOwner
+            );
+        }
+        if (signatureLength == SPHINCS_PLUS_128S_SIG_LEN) {
+            return _validateSphincsSignature(
+                SphincsProfile.SphincsPlus128s, SPHINCS_PLUS_128S_VERIFIER, userOp.signature, userOpHash, nextOwner
+            );
         }
 
         if (owner == address(0)) {
@@ -179,20 +230,30 @@ contract SimpleAccount is BaseAccount, TokenCallbackHandler, Initializable {
         return SIG_VALIDATION_SUCCESS;
     }
 
-    /// @dev SPHINCS- backup verification (co-equal, durable). A valid signature over `userOpHash`
-    ///      against the committed backup key authorizes the op and re-seeds the FORS `owner` to
-    ///      `nextOwner`. The backup key is never rotated. Length is guaranteed == SPHINCS_SIG_LEN and
-    ///      the stored key is canonical (see initialize), so verify() returns a bool and never reverts.
-    function _validateSphincsSignature(bytes calldata signature, bytes32 userOpHash, address nextOwner)
-        internal
-        returns (uint256 validationData)
-    {
-        if (!SPHINCS_VERIFIER.verify(backupPkSeed, backupPkRoot, userOpHash, signature)) {
+    function _validateSphincsSignature(
+        SphincsProfile profile,
+        ISphincsVerifier verifier,
+        bytes calldata signature,
+        bytes32 userOpHash,
+        address nextOwner
+    ) internal returns (uint256 validationData) {
+        SphincsPublicKey storage key = _sphincsKeys[uint256(profile)];
+        if (!verifier.verify(key.pkSeed, key.pkRoot, userOpHash, signature)) {
             return SIG_VALIDATION_FAILED;
         }
-        emit BackupSignerUsed(owner, nextOwner);
+        emit SphincsSignerUsed(profile, owner, nextOwner);
         _rotateOwner(nextOwner);
         return SIG_VALIDATION_SUCCESS;
+    }
+
+    function _requireSphincsLengthDisjoint(uint256 signatureLength) private pure {
+        require(signatureLength != FORS_SIG_LEN, "SimpleAccount: fors/sphincs len clash");
+        uint256 minEnvelope = ACTIVATION_HEADER_LENGTH + FORS_SIG_LEN;
+        require(
+            signatureLength < minEnvelope || (signatureLength - minEnvelope) % 32 != 0
+                || (signatureLength - minEnvelope) / 32 > MAX_ACTIVATION_PROOF_LENGTH,
+            "SimpleAccount: sphincs len in envelope"
+        );
     }
 
     function _payPrefund(uint256 missingAccountFunds) internal virtual override {
