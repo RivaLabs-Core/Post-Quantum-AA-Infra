@@ -32,3 +32,5 @@ abi/
 
 # Lean/Lake local dependency and build cache
 verity/.lake/
+
+images/
