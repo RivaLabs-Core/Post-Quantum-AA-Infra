@@ -40,16 +40,16 @@ library ForsSigner {
 
     function _adrsLeaf(uint256 t, uint256 mdT) private pure returns (bytes32) {
         // type=FORS_TREE, cp=0, ha = (t << A) | mdT
-        return bytes32((FORS_TYPE_FORS_TREE << 128) | ((t << FORS_A) | mdT));
+        return bytes32((FORS_TYPE_FORS_TREE << 96) | ((t << FORS_A) | mdT));
     }
 
     function _adrsNode(uint256 t, uint256 cp, uint256 idx) private pure returns (bytes32) {
         // type=FORS_TREE, cp=cp, ha = (t << (A-cp)) | idx
-        return bytes32((FORS_TYPE_FORS_TREE << 128) | (cp << 32) | ((t << (FORS_A - cp)) | idx));
+        return bytes32((FORS_TYPE_FORS_TREE << 96) | (cp << 32) | ((t << (FORS_A - cp)) | idx));
     }
 
     function _adrsRoots() private pure returns (bytes32) {
-        return bytes32(FORS_TYPE_FORS_ROOTS << 128);
+        return bytes32(FORS_TYPE_FORS_ROOTS << 96);
     }
 
     // ───────────────────── Hash primitives (match verifier) ────────────

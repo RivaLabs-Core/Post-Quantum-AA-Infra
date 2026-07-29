@@ -497,19 +497,19 @@ class ForsKey:
 
 
 def fors_adrs_leaf(t: int, leaf_idx: int) -> bytes:
-    return u256((FORS_TYPE_FORS_TREE << 128) | ((t << FORS_A) | leaf_idx))
+    return u256((FORS_TYPE_FORS_TREE << 96) | ((t << FORS_A) | leaf_idx))
 
 
 def fors_adrs_node(t: int, cp: int, parent_idx: int) -> bytes:
     return u256(
-        (FORS_TYPE_FORS_TREE << 128)
+        (FORS_TYPE_FORS_TREE << 96)
         | (cp << 32)
         | ((t << (FORS_A - cp)) | parent_idx)
     )
 
 
 def fors_adrs_roots() -> bytes:
-    return u256(FORS_TYPE_FORS_ROOTS << 128)
+    return u256(FORS_TYPE_FORS_ROOTS << 96)
 
 
 def fors_prf(sk_seed: bytes, adrs: bytes) -> bytes:
