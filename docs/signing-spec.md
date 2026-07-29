@@ -350,8 +350,14 @@ signature =
 
 ### 4.3 FORS ADRS
 
-ADRS is a 32-byte big-endian integer word. Implement the integer formulas
-below exactly; they are the current contract encoding.
+ADRS is a 32-byte big-endian integer word following the FIPS 205 §4.2 field
+layout: layer address at bytes 0..4, tree address at bytes 4..16, type at
+bytes 16..20, then three type-dependent words. Layer, tree and the keypair
+word are all zero for standalone FORS+C, since there is no hypertree above
+and no enclosing WOTS+ leaf.
+
+Implement the integer formulas below exactly; they are the current contract
+encoding.
 
 Constants:
 
@@ -364,20 +370,20 @@ Leaf ADRS:
 
 ```text
 ADRS_LEAF(t, leafIdx) =
-    uint256_be((3 << 128) | ((t << A) | leafIdx))
+    uint256_be((3 << 96) | ((t << A) | leafIdx))
 ```
 
 Internal node ADRS at tree height `cp`, where `cp = 1..5`:
 
 ```text
 ADRS_NODE(t, cp, parentIdx) =
-    uint256_be((3 << 128) | (cp << 32) | ((t << (A - cp)) | parentIdx))
+    uint256_be((3 << 96) | (cp << 32) | ((t << (A - cp)) | parentIdx))
 ```
 
 Roots-compression ADRS:
 
 ```text
-ADRS_ROOTS = uint256_be(4 << 128)
+ADRS_ROOTS = uint256_be(4 << 96)
 ```
 
 ### 4.4 FORS Hash Primitives
