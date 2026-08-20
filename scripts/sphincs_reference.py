@@ -34,10 +34,10 @@ from eth_abi import decode as abi_decode  # pip install eth-abi
 REPO_ROOT = Path(__file__).resolve().parents[1]
 OUT_PATH = REPO_ROOT / "test" / "vectors" / "sphincs-reference-0.json"
 DEFAULT_MESSAGE = "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
-SIG_LEN = 3688
+SIG_LEN = 8048
 
 # SPHINCS- parameters (informational; the verifier hardcodes them).
-PARAMS = {"n": 16, "h": 22, "d": 2, "a": 19, "k": 7, "w": 8, "l": 43, "target_sum": 208}
+PARAMS = {"n": 16, "h": 20, "d": 4, "a": 7, "k": 29, "w": 4, "l": 64, "target_sum": 96}
 
 
 def _signer_argv(upstream: Path, variant: str, force_python: bool) -> list[str]:

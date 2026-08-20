@@ -13,16 +13,21 @@ It fixes this: it is a co-equal signer that can sign any op, recover a stuck acc
 account on a new chain — without the q=1 fragility of FORS+C, because SPHINCS- is stateless and
 many-time (2²² budget).
 
-> The verifier is **vendored verbatim, UNAUDITED research code**. Gate any real-funds deployment on an
+> The verifier is **UNAUDITED research code**, derived from the reference impl with the parameter set
+> retargeted (see the note in `SphincsVerifier.sol`). Gate any real-funds deployment on an
 > audit of `src/Verifiers/SphincsVerifier.sol`.
 
 ## The SPHINCS- variant (keccak)
 
 - 128-bit (n=16), keccak256 (native EVM, no precompile), FIPS 205 §11.2.2 uncompressed 32-byte ADRS.
-- Parameters: `h=22 d=2 a=19 k=7 w=8 l=43 target_sum=208`.
-- Signature: **3,688 bytes** (no prefix). Public key: `(pkSeed, pkRoot)`, two 16-byte values
+- Parameters: `h=20 d=4 a=7 k=29 w=4 l=64 target_sum=96`. WOTS+C has NO checksum chains: all 64
+  chains carry message digits (64 x logW=2 = the full 8n=128-bit digest) and `target_sum` (the mean,
+  l*(w-1)/2) replaces the checksum.
+- Signature: **8,048 bytes** (no prefix). Public key: `(pkSeed, pkRoot)`, two 16-byte values
   left-aligned in `bytes32` (low 128 bits zero / `N_MASK`-canonical).
-- On-chain verify ≈ **105K gas**. Signature budget 2²² (≈4.2M) — sign rarely; track the count offchain.
+- On-chain verify: **not re-measured** for this parameter set — expect roughly 2x the canonical set’s
+  ≈105K (639 vs 335 keccak invocations, and larger FORS-roots / WOTS-pk compression windows).
+  Signature budget 2²⁰ (≈1.05M) — sign rarely; track the count offchain.
 - `H_msg` domain pad is `0xFF…FF`, **distinct** from NiceTry FORS+C's `0xFF…FD` (`ForsVerifier.sol`),
   so a FORS and a SPHINCS- signature can never collide on the same digest.
 
