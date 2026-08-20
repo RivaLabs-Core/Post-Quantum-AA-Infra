@@ -1,31 +1,34 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-/// @dev Signature length of the standard-WOTS+ SPHINCS- blob (no prefix). MUST equal the
-///      in-assembly `sig.length` check in `SphincsWotsPlusVerifier.verify` (8288). Distinct from
-///      `SPHINCS_SIG_LEN` (8048, the WOTS+C variant) and from `FORS_SIG_LEN` (2448).
-uint256 constant SPHINCS_WOTSPLUS_SIG_LEN = 8288;
+/// @dev Signature length of the standard SPHINCS- blob (no prefix). MUST equal the in-assembly
+///      `sig.length` check in `SphincsStandardVerifier.verify` (8400). Distinct from
+///      `SPHINCS_SIG_LEN` (8048, the FORS+C / WOTS+C variant) and `FORS_SIG_LEN` (2448).
+uint256 constant SPHINCS_STANDARD_SIG_LEN = 8400;
 
-/// @title SphincsWotsPlusVerifier — stateless SPHINCS- verifier using STANDARD WOTS+
-/// @notice Same tree shape as `SphincsVerifier` (n=16 h=20 d=4 a=7 k=29 w=4) but the Winternitz
-///         layer is **standard WOTS+ with checksum chains** instead of the constant-sum WOTS+C
-///         variant: l = len1 + len2 = 64 + 4 = 68, 8,288-byte signature.
+/// @title SphincsStandardVerifier — stateless SPHINCS- verifier, STANDARD on both layers
+/// @notice n=16 h=20 d=4 a=7 k=29 w=4 l=68, 8,400-byte signature, public key = (pkSeed, pkRoot).
+///         Unlike `SphincsVerifier` (which is FORS+C under WOTS+C), this contract uses the plain
+///         constructions throughout:
 ///
-///         Difference from the WOTS+C sibling, in full:
-///           * l = 68, of which the first 64 chains carry the message digits (64 x logW=2 bits =
-///             the full 8n=128-bit digest) and the last 4 carry the base-w checksum.
-///           * csum = SUM(w-1-digit_i) over the 64 message digits = 192 - digitSum, range [0,192],
-///             encoded as len2=4 base-4 digits. len2 = floor(log2(len1*(w-1))/log2 w) + 1.
-///           * There is NO per-layer 4-byte counter. WOTS+C needed one to grind the digit sum onto
-///             TARGET_SUM; a checksum is deterministic, so the field is gone and the WOTS message
-///             hash is keccak256(pkSeed ‖ ADRS ‖ node) — 96 bytes, not 128.
-///           * There is NO digit-sum equality check. Forgery resistance comes from the checksum:
-///             raising any message digit lowers csum, and a lower csum cannot be signed because
-///             base-w value is monotone in every digit (positive weights), so at least one
-///             checksum digit would have to be walked BACKWARD down its chain.
+///           * STANDARD FORS — all k=29 trees carry a revealed secret AND a full a=7 auth path.
+///             There is no forced-zero last tree and therefore NO `R` grinding: every FORS index
+///             is used as drawn from the digest, including the last, at bits [196,203).
+///           * STANDARD WOTS+ — l = len1 + len2 = 64 + 4 = 68, where the first 64 chains carry
+///             the message digits and the last 4 carry the base-w checksum
+///             csum = SUM(w-1-digit_i) = 192 - digitSum, range [0,192], encoded as 4 base-4
+///             digits (192 < 4^4). len2 = floor(log2(len1*(w-1))/log2 w) + 1.
+///             There is no per-layer grinding counter and no digit-sum equality check.
 ///
-///         FORS+C is UNCHANGED — the forced-zero last FORS tree and the R-grinding it implies are
-///         orthogonal to the Winternitz layer and are retained exactly as in `SphincsVerifier`.
+///         Forgery resistance in the WOTS layer comes from the checksum: raising any message
+///         digit lowers csum, and a lower csum cannot be signed because base-w value is monotone
+///         in every digit (positive positional weights), so some checksum chain would have to be
+///         walked BACKWARD.
+///
+///         Signature blob layout:
+///           R(16) ‖ 29 FORS secrets (16 each) ‖ 29 FORS auth paths (7*16 each)
+///           ‖ 4 x [ 68 WOTS chains (16 each) ‖ subtree auth path (5*16) ]
+///           = 16 + 464 + 3248 + 4*1168 = 8400
 ///
 /// @dev    Address layout: FIPS 205 §4.2 / §11.2.2 uncompressed 32-byte ADRS (the SHAKE
 ///         instantiation form) with keccak256 substituted for SHAKE-256 to stay native on EVM.
@@ -45,23 +48,20 @@ uint256 constant SPHINCS_WOTSPLUS_SIG_LEN = 8288;
 ///           3 FORS_TREE   (key_pair_address, tree_height,   tree_index)
 ///           4 FORS_ROOTS  (key_pair_address, 0,             0)
 ///
-///         Signature blob layout:
-///           R(16) ‖ 29 FORS secrets (16 each) ‖ 28 FORS auth paths (7*16 each)
-///           ‖ 4 x [ 68 WOTS chains (16 each) ‖ subtree auth path (5*16) ]
-///
-/// @dev    DIGIT ORDER (interop-critical): digits are read LSB-first out of the keccak word —
+/// @dev    DIGIT ORDER (interop-critical): WOTS digits are read LSB-first out of the keccak word —
 ///         `digit_i = (d >> (i*logW)) & (w-1)` — and the checksum digits likewise
 ///         `(csum >> (j*logW)) & (w-1)`. This is this codebase's existing convention (see
 ///         `SphincsVerifier`), NOT the FIPS 205 `base_w` byte order, which reads most-significant
-///         first. The scheme is sound either way (the monotonicity argument above depends only on
+///         first. The scheme is sound either way (the monotonicity argument depends only on
 ///         positional weights being positive, not on their order), but a signer MUST mirror this
-///         choice or every signature fails.
+///         choice or every signature fails. Same applies to the FORS indices, read as
+///         `(digest >> (i*a)) & (2^a - 1)`.
 ///
 /// @dev    DERIVED (MIT) from the SPHINCS- reference implementation via `SphincsVerifier.sol`.
-///         UNAUDITED research prototype, and — like its sibling — it has never verified a real
-///         signature, because no signer emits this parameter set yet. Gate any real-funds use on
-///         an audit AND on end-to-end vectors.
-contract SphincsWotsPlusVerifier {
+///         UNAUDITED research prototype. Supersedes the short-lived `SphincsWotsPlusVerifier`,
+///         which paired standard WOTS+ with FORS+C and so produced an 8,288-byte blob that no
+///         standard signer emits.
+contract SphincsStandardVerifier {
 
     function verify(bytes32 pkSeed, bytes32 pkRoot, bytes32 message, bytes calldata sig)
         external pure returns (bool valid)
@@ -75,11 +75,11 @@ contract SphincsWotsPlusVerifier {
         //
         // Memory high-water mark: the WOTS chain-head buffer spans 0x80 + 32*i for i < l=68,
         // ending at 0x900; the WOTS_PK compression window is keccak256(0x00, 0x8C0). The FORS
-        // phase below ends at 0x420 and is fully consumed before the hypertree starts.
+        // phase ends at 0x420 and is fully consumed before the hypertree starts.
         assembly {
             let N_MASK := 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF00000000000000000000000000000000
 
-            if iszero(eq(sig.length, 8288)) {
+            if iszero(eq(sig.length, 8400)) {
                 mstore(0x00, 0x08c379a000000000000000000000000000000000000000000000000000000000)
                 mstore(0x04, 0x20)
                 mstore(0x24, 18)
@@ -102,8 +102,7 @@ contract SphincsWotsPlusVerifier {
             let root := pkRoot
             mstore(0x00, seed)
 
-            // H_msg (domain-separated, 160 bytes) — identical to the WOTS+C sibling, so the two
-            // variants share the FORS/hypertree index derivation.
+            // H_msg (domain-separated, 160 bytes)
             let R := and(calldataload(sig.offset), N_MASK)
             mstore(0x20, root)
             mstore(0x40, R)
@@ -113,17 +112,15 @@ contract SphincsWotsPlusVerifier {
 
             // htIdx = (digest >> 203) & (2^20-1). PARAM IDENTITIES: 203 = K*A = 29*7 ;
             // 0xFFFFF = 2^H-1 = 2^20-1. Digest budget: K*A + H = 223 <= 256.
+            // NOTE: identical to the FORS+C sibling — that variant reserves the same K*A bits and
+            // merely constrains the top a-bit field to zero, so the digest layout does not move.
             let htIdx := and(shr(203, digest), 0xFFFFF)
 
             // ============================================================
-            // FORS+C (K=29, A=7) — UNCHANGED from SphincsVerifier
+            // STANDARD FORS (K=29, A=7) — every tree has a secret and an auth path.
+            // No forced-zero tree, hence no early-return gate and no R grinding.
             // ============================================================
             let dVal := digest
-            // Forced-zero: last FORS index (i=K-1=28) occupies bits [196,203), a 7-bit field.
-            // PARAM IDENTITIES: 196 = (K-1)*A = 28*7 ; 0x7F = 2^A-1.
-            // Well-formed-but-invalid signatures return `false`, never an empty revert.
-            if and(shr(196, dVal), 0x7F) { mstore(0x00, 0) return(0x00, 0x20) }
-
             let sigBase := sig.offset
 
             // SUBTREE_H = 5 (h/d = 20/4). PARAM IDENTITIES: 0x1F = 2^SUBTREE_H-1 ; shift 5.
@@ -132,17 +129,18 @@ contract SphincsWotsPlusVerifier {
             // forsBase: tree=idxTree0 (shl 128), type=3 (shl 96), kp=idxLeaf0 (shl 64).
             let forsBase := or(shl(128, idxTree0), or(shl(96, 3), shl(64, idxLeaf0)))
 
-            // K-1=28 normal trees
-            for { let i := 0 } lt(i, 28) { i := add(i, 1) } {
+            for { let i := 0 } lt(i, 29) { i := add(i, 1) } {
                 let treeIdx := and(shr(mul(i, 7), dVal), 0x7F) // 7=A-bit indices, shift i*A
                 let secretVal := and(calldataload(add(sigBase, add(16, shl(4, i)))), N_MASK)
-                // Leaf hash (height 0): word3 = (i << A) | treeIdx, A=7.
+                // Leaf hash (height 0): word3 = (i << A) | treeIdx, A=7 (folds the k FORS trees
+                // into one tree_index space, FIPS 205 Alg. 17).
                 mstore(0x20, or(forsBase, or(shl(7, i), treeIdx)))
                 mstore(0x40, secretVal)
                 let node := and(keccak256(0x00, 0x60), N_MASK)
 
                 let pathIdx := treeIdx
-                // AUTH_START = 16 + K*N = 480, auth per tree = A*N = 112
+                // AUTH_START = 16 + K*N = 480, auth per tree = A*N = 112.
+                // Last tree (i=28) spans [3616, 3728) = up to HT_START.
                 let authPtr := add(sigBase, add(480, mul(i, 112)))
 
                 for { let hh := 0 } lt(hh, 7) { hh := add(hh, 1) } {
@@ -160,14 +158,6 @@ contract SphincsWotsPlusVerifier {
                 mstore(add(0x80, shl(5, i)), node)
             }
 
-            // Last tree (forced-zero): secret is the revealed root, hashed under FORS_TREE leaf ADRS
-            {
-                let lastSecret := and(calldataload(add(sigBase, add(16, shl(4, 28)))), N_MASK) // 464
-                mstore(0x20, or(forsBase, shl(7, 28))) // word3 = (K-1) << A
-                mstore(0x40, lastSecret)
-                mstore(0x400, and(keccak256(0x00, 0x60), N_MASK)) // 0x80 + 28*0x20
-            }
-
             // Compress K=29 roots: keccak256(seed || FORS_ROOTS-ADRS || 29 roots), window
             // 32 + 32 + 29*32 = 0x3E0. Copy is safe: dest 0x40+32i sits two slots below
             // src 0x80+32i, so slot i's source is only clobbered at iteration i+2.
@@ -182,7 +172,7 @@ contract SphincsWotsPlusVerifier {
             // ============================================================
             let currentNode := forsPk
             let idxTree := htIdx
-            let sigOff := 3616 // HT_START = 16 + K*N + (K-1)*A*N = 480 + 3136
+            let sigOff := 3728 // HT_START = 16 + K*N + K*A*N = 16 + 464 + 3248
 
             for { let layer := 0 } lt(layer, 4) { layer := add(layer, 1) } {
                 let idxLeaf := and(idxTree, 0x1F) // 2^5 - 1
@@ -193,14 +183,14 @@ contract SphincsWotsPlusVerifier {
                 let wotsAdrs := or(shl(224, layer), or(shl(128, idxTree), shl(64, idxLeaf)))
 
                 // WOTS-message digest. NO counter word: standard WOTS+ needs no grinding, so
-                // this is 96 bytes (seed ‖ ADRS ‖ node) where WOTS+C hashed 128.
+                // this hashes 96 bytes (seed ‖ ADRS ‖ node).
                 mstore(0x20, wotsAdrs)
                 mstore(0x40, currentNode)
                 let dw := keccak256(0x00, 0x60)
 
                 // Checksum over the 64 message digits: csum = SUM(w-1-digit) = 192 - digitSum.
                 // PARAM IDENTITIES: bound 64 = LEN1 ; shift 2 = LOG_W ; mask 0x3 = W-1 ;
-                // 192 = LEN1*(W-1), the maximum csum and the value at digitSum == 0.
+                // 192 = LEN1*(W-1), the maximum csum and its value at digitSum == 0.
                 let digitSum := 0
                 for { let ii := 0 } lt(ii, 64) { ii := add(ii, 1) } {
                     digitSum := add(digitSum, and(shr(mul(ii, 2), dw), 0x3))
@@ -208,8 +198,7 @@ contract SphincsWotsPlusVerifier {
                 let csum := sub(192, digitSum)
 
                 // 68 WOTS chains (w=4: max 3 steps each). Chains [0,64) take message digits from
-                // `dw`; chains [64,68) take the LEN2=4 base-4 digits of csum. csum <= 192 < 4^4,
-                // so the 4 digits capture it exactly.
+                // `dw`; chains [64,68) take the LEN2=4 base-4 digits of csum.
                 let wotsPtr := add(sigBase, sigOff)
                 for { let i := 0 } lt(i, 68) { i := add(i, 1) } {
                     let digit
