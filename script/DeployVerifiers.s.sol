@@ -5,11 +5,12 @@ import "forge-std/Script.sol";
 import {SphincsVerifier, SPHINCS_SIG_LEN} from "../src/Verifiers/SphincsVerifier.sol";
 import {SphincsParamVerifier} from "../src/Verifiers/SphincsParamVerifier.sol";
 import {SphincsParamsLib} from "../src/Verifiers/SphincsParamsLib.sol";
+import {SphincsWotsPlusVerifier, SPHINCS_WOTSPLUS_SIG_LEN} from "../src/Verifiers/SphincsWotsPlusVerifier.sol";
 
-/// @title DeployVerifiers — standalone CREATE2 deploy of the two SPHINCS- verifiers
+/// @title DeployVerifiers — standalone CREATE2 deploy of the SPHINCS- verifiers
 /// @notice Deploys ONLY the verifiers. It deliberately does NOT touch `SimpleAccountFactory` or
 ///         the `SimpleAccount` implementation, so the existing deterministic address family
-///         (factory / impl / accounts) is left exactly as deployed. Both contracts are stateless
+///         (factory / impl / accounts) is left exactly as deployed. All contracts are stateless
 ///         and take no constructor arguments.
 /// @dev    The retargeted `SphincsVerifier` gets a PARAM-DISTINGUISHING salt so the v1 salt keeps
 ///         pointing at the canonical (h=22 d=2 a=19 k=7 w=8 l=43) deployment and `addresses.json`
@@ -21,10 +22,12 @@ contract DeployVerifiers is Script {
 
     bytes32 constant DEFAULT_SPHINCS_VERIFIER_SALT = keccak256("NiceTry.SphincsVerifier.h20d4a7k29w4.v2");
     bytes32 constant DEFAULT_SPHINCS_PARAM_VERIFIER_SALT = keccak256("NiceTry.SphincsParamVerifier.v1");
+    bytes32 constant DEFAULT_WOTSPLUS_VERIFIER_SALT = keccak256("NiceTry.SphincsWotsPlusVerifier.h20d4a7k29w4l68.v1");
 
     function run() external {
         bytes32 sphincsSalt = vm.envOr("SPHINCS_VERIFIER_SALT", DEFAULT_SPHINCS_VERIFIER_SALT);
         bytes32 paramSalt = vm.envOr("SPHINCS_PARAM_VERIFIER_SALT", DEFAULT_SPHINCS_PARAM_VERIFIER_SALT);
+        bytes32 wotsPlusSalt = vm.envOr("WOTSPLUS_VERIFIER_SALT", DEFAULT_WOTSPLUS_VERIFIER_SALT);
 
         require(CREATE2_DEPLOYER.code.length != 0, "Deploy: missing CREATE2 deployer");
 
@@ -42,10 +45,14 @@ contract DeployVerifiers is Script {
         bytes memory paramInitCode = type(SphincsParamVerifier).creationCode;
         address predictedParam = _predictDeterministicAddress(paramSalt, paramInitCode);
 
+        bytes memory wotsPlusInitCode = type(SphincsWotsPlusVerifier).creationCode;
+        address predictedWotsPlus = _predictDeterministicAddress(wotsPlusSalt, wotsPlusInitCode);
+
         vm.startBroadcast();
 
         address sphincsVerifier = _deployDeterministic(sphincsSalt, sphincsInitCode);
         address paramVerifier = _deployDeterministic(paramSalt, paramInitCode);
+        address wotsPlusVerifier = _deployDeterministic(wotsPlusSalt, wotsPlusInitCode);
 
         vm.stopBroadcast();
 
@@ -56,11 +63,20 @@ contract DeployVerifiers is Script {
         console.logBytes32(paramSalt);
         console.log("SphincsVerifier deployed at:     ", sphincsVerifier);
         console.log("SphincsParamVerifier deployed at:", paramVerifier);
-        console.log("SPHINCS_SIG_LEN:                 ", SPHINCS_SIG_LEN);
+        console.log("WotsPlusVerifier salt:           ");
+        console.logBytes32(wotsPlusSalt);
+        console.log("SphincsWotsPlusVerifier at:      ", wotsPlusVerifier);
+        console.log("SPHINCS_SIG_LEN (WOTS+C):        ", SPHINCS_SIG_LEN);
+        console.log("SPHINCS_WOTSPLUS_SIG_LEN:        ", SPHINCS_WOTSPLUS_SIG_LEN);
         console.log("packed retargeted params:        ", SphincsParamsLib.pack(SphincsParamsLib.retargeted()));
 
         require(sphincsVerifier == predictedSphincs, "Deploy: sphincs verifier address drift");
         require(paramVerifier == predictedParam, "Deploy: param verifier address drift");
+        require(wotsPlusVerifier == predictedWotsPlus, "Deploy: wots+ verifier address drift");
+        require(wotsPlusVerifier.code.length != 0, "Deploy: wots+ verifier has no code");
+        // The two SPHINCS blob lengths must stay distinct so a caller can never confuse the
+        // constant-sum variant with the checksum variant by length alone.
+        require(SPHINCS_WOTSPLUS_SIG_LEN != SPHINCS_SIG_LEN, "Deploy: variant length clash");
         require(sphincsVerifier.code.length != 0, "Deploy: sphincs verifier has no code");
         require(paramVerifier.code.length != 0, "Deploy: param verifier has no code");
     }
