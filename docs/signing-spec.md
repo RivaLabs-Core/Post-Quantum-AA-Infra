@@ -9,12 +9,13 @@ signatures that recover the same owner address in:
 
 - `src/Verifiers/ForsVerifier.sol`
 - `src/SimpleAccount.sol`
-- `other-implementations/wots/WotsCVerifier.sol`
-- `other-implementations/wots/SimpleAccount_WOTS.sol`
-- `other-implementations/wots/KernelRotatingWOTSValidator.sol`
 
-ECDSA is included only for account-level binding rules. The post-quantum
-signature formats are WOTS+C and FORS+C.
+ECDSA is included only for account-level binding rules. The active
+post-quantum signature format is FORS+C. The WOTS+C section is kept for
+signers that still implement it; the WOTS+C contracts themselves
+(`WotsCVerifier`, `SimpleAccount_WOTS`, `KernelRotatingWOTSValidator`) are no
+longer part of this repo and live in git history (branch
+`archive/dev-pre-cleanup`, directory `other-implementations/`).
 
 ## 1. Shared Conventions
 
@@ -71,7 +72,8 @@ Every input below is raw byte concatenation.
 ### 1.4 UserOp Digest Binding
 
 For WOTS+C and FORS+C accounts, the signed digest is the raw ERC-4337
-`userOpHash`.
+`userOpHash`. The first FORS+C activation uses a larger signature envelope, but
+the FORS blob inside that envelope still signs `userOpHash`.
 
 The signer must build the UserOp so that `userOp.callData` ends with the next
 owner address:
@@ -93,6 +95,11 @@ owner = nextOwner
 
 Do not put `nextOwner` in the signature only. It must be in `callData`, because
 `userOpHash` commits to `callData`.
+
+For the root-based FORS account, deployment starts with `owner == address(0)`.
+The first UserOp must use the activation signature envelope described in
+[Account-Level Signing Procedure](#5-account-level-signing-procedure). After
+activation, normal FORS signatures are exactly `FORS_SIG_LEN` bytes again.
 
 ECDSA mode differs only in the signing primitive: it signs
 `toEthSignedMessageHash(userOpHash)`, matching OpenZeppelin `ECDSA.recover`.
@@ -344,8 +351,14 @@ signature =
 
 ### 4.3 FORS ADRS
 
-ADRS is a 32-byte big-endian integer word. Implement the integer formulas
-below exactly; they are the current contract encoding.
+ADRS is a 32-byte big-endian integer word following the FIPS 205 §4.2 field
+layout: layer address at bytes 0..4, tree address at bytes 4..16, type at
+bytes 16..20, then three type-dependent words. Layer, tree and the keypair
+word are all zero for standalone FORS+C, since there is no hypertree above
+and no enclosing WOTS+ leaf.
+
+Implement the integer formulas below exactly; they are the current contract
+encoding.
 
 Constants:
 
@@ -358,20 +371,20 @@ Leaf ADRS:
 
 ```text
 ADRS_LEAF(t, leafIdx) =
-    uint256_be((3 << 128) | ((t << A) | leafIdx))
+    uint256_be((3 << 96) | ((t << A) | leafIdx))
 ```
 
 Internal node ADRS at tree height `cp`, where `cp = 1..5`:
 
 ```text
 ADRS_NODE(t, cp, parentIdx) =
-    uint256_be((3 << 128) | (cp << 32) | ((t << (A - cp)) | parentIdx))
+    uint256_be((3 << 96) | (cp << 32) | ((t << (A - cp)) | parentIdx))
 ```
 
 Roots-compression ADRS:
 
 ```text
-ADRS_ROOTS = uint256_be(4 << 128)
+ADRS_ROOTS = uint256_be(4 << 96)
 ```
 
 ### 4.4 FORS Hash Primitives
@@ -589,6 +602,67 @@ Malformed FORS signatures usually recover a different nonzero address. They
 only return `address(0)` on bad length or failed grinding check.
 
 ## 5. Account-Level Signing Procedure
+
+### 5.1 Initial Activation
+
+The root-based FORS account is deployed inactive:
+
+```text
+owner             = address(0)
+initialSignerRoot = Merkle root over supported-chain initial signers
+```
+
+The first UserOp proves that the chain-local first signer is in that root. The
+activation signature layout is:
+
+```text
+offset  length  field
+0       1       activationVersion = 1
+1       2       proofLen = uint16_be(number of proof siblings)
+3       32*N    Merkle proof siblings
+3+32N   2448    FORS signature over EntryPoint.getUserOpHash(userOp)
+```
+
+The activation Merkle leaf is:
+
+```text
+leaf = keccak256(abi.encode(
+    keccak256("NiceTryInitialSignerLeaf:v1(uint256 chainId,address signer)"),
+    chainId,
+    initialSignerAddress
+))
+```
+
+The tree uses sorted-pair Keccak hashing, verified onchain with Solady
+`MerkleProofLib.verify`.
+
+Activation procedure:
+
+```text
+initial = chain-local first signer S_0
+next    = already-derived signer S_1
+
+callData = account_call || bytes20(address(S_1))
+userOp   = PackedUserOperation(..., callData=callData, signature="")
+digest   = EntryPoint.getUserOpHash(userOp)
+
+forsSig = FORS_sign(S_0, digest)
+userOp.signature =
+    activationVersion ||
+    proofLen ||
+    merkleProof ||
+    forsSig
+
+submit userOp
+```
+
+If the UserOp includes `initCode` and the account is predeployed before the
+UserOp lands, the retry with `initCode = ""` has a different `userOpHash` and
+therefore needs a second activation signature. This is intentional in the
+current ERC-4337 implementation and relies on the FORS+C bounded-reuse policy
+for that deployment race.
+
+### 5.2 Normal Rotation
 
 For each transaction:
 

@@ -402,8 +402,9 @@ ever becomes the binding constraint.
 
 One-time signature (OTS), not few-time: any reuse breaks immediately.
 Smaller signature than FORS at comparable security (~750 B vs 1,984 B for
-FORS+C). WOTS+C is now retained under `other-implementations/` as a legacy
-comparison path. The main `SimpleAccountFactory` deploys the FORS-backed
+FORS+C). WOTS+C is no longer part of this repo; the legacy contracts live in
+git history (branch `archive/dev-pre-cleanup`, directory
+`other-implementations/`). The main `SimpleAccountFactory` deploys the FORS-backed
 `SimpleAccount`; FORS is the safer-on-reuse alternative to WOTS+C, paying
 ~3x the bytes for graceful degradation.
 

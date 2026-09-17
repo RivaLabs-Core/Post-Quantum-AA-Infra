@@ -177,8 +177,8 @@ contract ForsVerifier is ISignatureVerifier {
 
             // ─── FORS tree verification (K-1 real trees) ───
             //   ADRS base for FORS at this standalone keypair:
-            //   type=3, layer=tree=kp=0
-            let forsBase := shl(128, 3)
+            //   type=3 at FIPS 205 bytes 16..20, layer=tree=kp=0
+            let forsBase := shl(96, 3)
 
             for {
                 let t := 0
@@ -256,7 +256,7 @@ contract ForsVerifier is ISignatureVerifier {
 
             // ─── Compress K-1 FORS roots ───
             //   T(seed, ADRS_roots, root_0..root_{K-2}) over (K+1)·32 bytes
-            mstore(0x20, shl(128, 4)) // type=FORS_ROOTS, kp=0
+            mstore(0x20, shl(96, 4)) // type=FORS_ROOTS at bytes 16..20, kp=0
             let pkRoot := and(keccak256(0x00, ROOTS_HASH_LEN), N_MASK)
 
             // ─── Address = keccak256(pad32(pkSeed) || pad32(pkRoot))[12:32] ───

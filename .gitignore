@@ -7,19 +7,18 @@ __pycache__/
 # Local research / agent cache
 .codex-cache/
 
-# Ignores development broadcast logs
-!/broadcast
-/broadcast/*/31337/
-/broadcast/**/dry-run/
+# Broadcast logs
 broadcast/
 
-# Docs (forge-doc output) — but keep hand-written notes
+# Docs: forge-doc output is ignored, hand-written notes are whitelisted
 docs/*
 !docs/fors-parameters.md
 !docs/fors-two-forest-cache.md
-!docs/fors-frame-account-plan.md
-!docs/frame-rotation-validation.md
 !docs/signing-spec.md
+!docs/sphincs-backup-recovery.md
+!docs/multichain-consistent-addresses.md
+
+images/
 
 # Dotenv file
 .env
@@ -33,4 +32,6 @@ abi/
 # Lean/Lake local dependency and build cache
 verity/.lake/
 
-images/
+# Deploy runbook + packaged artifacts (local)
+/DEPLOY_PROCESS.md
+dist/

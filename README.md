@@ -7,84 +7,86 @@ Reference Solidity implementation of the NiceTry ephemeral-key smart wallet desi
 
 ## What This Repo Contains
 
-ERC-4337 smart account that uses FORS+C as the primary signer and rotates the
-authorizing key on every UserOp.
+An ERC-4337 smart account with two hash-based, post-quantum signers:
 
-| Scheme | Signature | Verify gas |
-| --- | ---: | ---: |
-| FORS+C | 2,448 B | ~35k |
+| Role | Scheme | Signature | Verify gas |
+| --- | --- | ---: | ---: |
+| Primary (every UserOp) | FORS+C | 2,448 B | ~35k |
+| Backup / recovery / bootstrap | SPHINCS- | 3,688 B | ~105k |
 
-FORS+C is a Forest of Random Subsets few-time signature using the SPHINCS+ FIPS
-205 ADRS layout and a grinding optimization. Compared with WOTS+C, accidental
-key reuse degrades more gracefully, which is why it is now the main account
-implementation.
+- **FORS+C** is a Forest of Random Subsets few-time signature using the
+  SPHINCS+ FIPS 205 ADRS layout and a grinding optimization. The account
+  rotates the authorizing FORS key on every UserOp, so a key is never reused.
+  Accidental reuse degrades gracefully instead of breaking outright.
+- **SPHINCS-** is a stateless, many-time SPHINCS+/SLH-DSA variant (keccak256,
+  128-bit). It is a durable cold key committed into the account address. It can
+  sign any op, recover an account whose rotation chain broke, and bootstrap the
+  account on a chain that was not in the activation Merkle tree.
 
-`SimpleAccountFactory` deploys FORS-backed `SimpleAccount` clones. The older
-ECDSA and WOTS+C account/module work remains under `other-implementations/` for
-comparison and regression tests.
-
-Frame transactions related work is split into `FrameAccount` plus an opcode/runtime
-adapter task. The account logic is present; the EIP-8141 opcode bridge is still
-deliberately abstract.
+`SimpleAccountFactory` deploys `SimpleAccount` clones (EIP-1167) at CREATE2
+addresses that commit to both the per-chain initial-signer Merkle root and the
+SPHINCS- backup key, so the same address is reachable on every chain.
 
 ## Contract Layout
 
 ```text
 src/
-+-- SimpleAccount.sol                    ERC-4337 FORS-backed account
-+-- SimpleAccountFactory.sol             FORS-only CREATE2 factory
-+-- FrameAccount.sol                      EIP-8141 frame account logic
-+-- frame/
-|   +-- FrameTransactionLib.sol           EIP-8141 constants
++-- SimpleAccount.sol                    ERC-4337 account: FORS+C primary, SPHINCS- backup
++-- SimpleAccountFactory.sol             CREATE2 clone factory
++-- InitialSignerCommitment.sol          Salt / activation-leaf / backup-leaf domains
 +-- Verifiers/
-|   +-- ForsVerifier.sol                  FORS+C verifier
+|   +-- ForsVerifier.sol                 FORS+C verifier (recover -> owner address)
+|   +-- SphincsVerifier.sol              SPHINCS- verifier (verify -> bool)
 +-- Interfaces/
-|   +-- ISignatureVerifier.sol
-+-- Utility/
-    +-- token.sol                         TestToken
+    +-- ISignatureVerifier.sol
+    +-- ISphincsVerifier.sol
 
-other-implementations/
-+-- LegacySimpleAccountFactory.sol        ECDSA/WOTS comparison factory
-+-- ecdsa/
-|   +-- SimpleAccount_ECDSA.sol
-|   +-- RotatingECDSAValidator.sol
-|   +-- KernelRotatingECDSAValidator.sol
-+-- wots/
-|   +-- SimpleAccount_WOTS.sol
-|   +-- WotsCVerifier.sol
-|   +-- IWotsCVerifier.sol
-|   +-- KernelRotatingWOTSValidator.sol
-+-- kernel/
-    +-- IERC7579.sol  IKernelValidator.sol
-    +-- MockKernelAccount.sol  MockNexusAccount.sol
+script/Deploy.s.sol                      Deterministic CREATE2 deploy (Foundry)
+deploy-4337/                             Same deploy, gas-sponsored through ERC-4337 + Pimlico
+scripts/signing_reference.py             Dependency-free FORS+C reference signer / vector generator
+scripts/sphincs_reference.py             Drives the upstream SPHINCS- signer to mint a test vector
+test/vectors/fors-reference-0.json       FORS+C reference vector checked by ForsReferenceVector.t.sol
 
 docs/
-+-- fors-parameters.md                  FORS+C parameter notes
-+-- fors-two-forest-cache.md            FORS+C cache/reuse notes
-+-- frame-rotation-validation.md        Frame rotation validation checks
-+-- signing-spec.md                     Signing payload layout
++-- signing-spec.md                      Byte-level signing spec (FORS+C, account envelope)
++-- fors-parameters.md                   FORS+C parameter choice and security analysis
++-- fors-two-forest-cache.md             Signer-side tree cache / reuse notes
++-- sphincs-backup-recovery.md           SPHINCS- backup signer: dispatch, binding, recovery
++-- multichain-consistent-addresses.md   Root-based first activation across chains
 ```
 
-The `docs/` directory contains hand-written design notes for the active FORS
-implementation: parameter choices, signer/cache behavior, signing payloads, and
-the frame-account rule that ties validation to the next `rotateOwner` frame.
-Generated Forge documentation remains ignored.
+`lib/kernel` is kept as a submodule only because it vendors `solady`, which the
+account uses for Merkle proofs and clone deployment.
+
+## Signature Dispatch
+
+`SimpleAccount` routes a UserOp signature purely by its length:
+
+| Length | Account state | Path |
+| --- | --- | --- |
+| 2,448 | activated | FORS+C: `recover()` must return an `AUTH_ACTIVE` key; that key is burned and `nextOwner` activated |
+| 2,451 + 32·proofLen | not activated | Activation envelope: FORS+C signature plus Merkle proof against `initialSignerRoot` |
+| 3,688 | either | SPHINCS-: verified against the committed backup key; re-seeds the FORS chain |
+
+The three length classes are disjoint. A constructor guard and a test enforce
+that they stay so. `userOp.callData` ends with the 20-byte `nextOwner`
+(FORS / activation) or with `currentKey || nextOwner` (SPHINCS-). Multiple
+devices are supported through per-key `authState` and `addSigner()`.
 
 ## Parameters
 
-Parameters for the post-quantum schemes are still in a tuning phase. None of
-the current choices are definitive, and we expect to revisit them as the design
-and tooling mature.
+Parameters are still in a tuning phase and may change.
 
 **FORS+C** (`src/Verifiers/ForsVerifier.sol`): K=26 trees, A=5 (32 leaves
 each), N=16. Signature 2,448 bytes. q-degradation: q=1 = 128 bits (NIST
-Level 1), q=2 = 104, q=5 = 70. Signer hashes per signature: ~2.4k
-(interactive on hardware wallets). Tree cache per keypair: ~25 KB
-(K-1 = 25 trees x 63 nodes x 16 B).
+Level 1), q=2 = 104, q=5 = 70. Signer hashes per signature: ~2.4k. Tree cache
+per keypair: ~25 KB. To retune, edit the primary parameters at the top of the
+verifier; all derived constants recompute automatically.
 
-To retune FORS+C, edit the primary parameters at the top of
-`src/Verifiers/ForsVerifier.sol`. All derived constants (signature layout,
-hash inputs, loop bounds, masks) recompute automatically.
+**SPHINCS-** (`src/Verifiers/SphincsVerifier.sol`): n=16, h=22, d=2, a=19, k=7,
+w=8, l=43. Signature 3,688 bytes, budget 2^22 signatures per key. The verifier
+is vendored verbatim from the [SPHINCS-](https://github.com/nconsigny/SPHINCS-)
+reference implementation and is unaudited research code.
 
 ## Build And Test
 
@@ -94,20 +96,36 @@ forge build
 forge test
 ```
 
-215 tests across 15 suites. Coverage includes:
+63 tests across 5 suites. Coverage includes:
 
-- Round-trip cryptographic tests for the main FORS verifier.
-- Main account and frame-account tests.
-- Legacy WOTS/ECDSA account, module, integration, and gas tests under
-  `test/other-implementations/`.
+- Round-trip cryptographic tests for the FORS+C verifier, including a committed
+  reference vector produced by `scripts/signing_reference.py`.
+- Account tests: factory address binding, activation, rotation, multi-device
+  enrollment, SPHINCS- dispatch and recovery (with mock verifiers).
+- SPHINCS- verifier guard tests. The vector-backed happy-path tests activate
+  once `test/vectors/sphincs-reference-0.json` is generated with
+  `scripts/sphincs_reference.py` (needs the external SPHINCS- signer).
 
 ## Deploy
 
-A deploy script lives at `script/Deploy.s.sol`. Running it deploys
-`ForsVerifier`, the FORS-only `SimpleAccountFactory`, and the single
-`SimpleAccount` implementation created by the factory constructor. The script
-targets the canonical ERC-4337 EntryPoint v0.7, which lives at the same address
-on mainnet, Sepolia, and other rollups.
+`script/Deploy.s.sol` deploys `ForsVerifier`, `SphincsVerifier` and
+`SimpleAccountFactory` (which deploys the single `SimpleAccount`
+implementation in its constructor) through the standard CREATE2 deployer at
+`0x4e59b44847b379578588920cA78FbF26c0B4956C`. With the same salts, bytecode and
+constructor arguments the addresses are identical on every chain. The script
+targets ERC-4337 EntryPoint v0.7 by default.
+
+`deploy-4337/` performs the same deployment from a Pimlico-sponsored UserOp so
+no native gas is needed. See its README.
+
+## Legacy Code
+
+Earlier WOTS+C and ECDSA accounts, the ZeroDev Kernel / Nexus ERC-7579 modules,
+the EIP-8141 `FrameAccount` draft and the stateful `SphincsIndexedVerifier`
+were removed from the main line. They are preserved in git history on the
+`archive/dev-pre-cleanup` branch. The runtime-parameterised
+`SphincsParamVerifier` and the multi-backup-signer account are in progress on
+`multiSphincs_account`.
 
 ## Related Repos
 
