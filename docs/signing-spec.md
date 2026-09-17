@@ -9,12 +9,13 @@ signatures that recover the same owner address in:
 
 - `src/Verifiers/ForsVerifier.sol`
 - `src/SimpleAccount.sol`
-- `other-implementations/wots/WotsCVerifier.sol`
-- `other-implementations/wots/SimpleAccount_WOTS.sol`
-- `other-implementations/wots/KernelRotatingWOTSValidator.sol`
 
-ECDSA is included only for account-level binding rules. The post-quantum
-signature formats are WOTS+C and FORS+C.
+ECDSA is included only for account-level binding rules. The active
+post-quantum signature format is FORS+C. The WOTS+C section is kept for
+signers that still implement it; the WOTS+C contracts themselves
+(`WotsCVerifier`, `SimpleAccount_WOTS`, `KernelRotatingWOTSValidator`) are no
+longer part of this repo and live in git history (branch
+`archive/dev-pre-cleanup`, directory `other-implementations/`).
 
 ## 1. Shared Conventions
 
