@@ -7,12 +7,13 @@ Reference Solidity implementation of the NiceTry ephemeral-key smart wallet desi
 
 ## What This Repo Contains
 
-An ERC-4337 smart account with two hash-based, post-quantum signers:
+Two ERC-4337 smart account families built on hash-based, post-quantum signatures:
 
-| Role | Scheme | Signature | Verify gas |
-| --- | --- | ---: | ---: |
-| Primary (every UserOp) | FORS+C | 2,448 B | ~35k |
-| Backup / recovery / bootstrap | SPHINCS- | 3,688 B | ~105k |
+| Account | Signer | Scheme | Signature | Verify gas |
+| --- | --- | --- | ---: | ---: |
+| `SimpleAccount` | Primary (every UserOp) | FORS+C | 2,448 B | ~35k |
+| `SimpleAccount` | Backup / recovery / bootstrap | SPHINCS- | 3,688 B | ~105k |
+| `SphincsAccount` | Only signer | SPHINCS- (standard FORS + WOTS+) | 8,400 B | ~268k |
 
 - **FORS+C** is a Forest of Random Subsets few-time signature using the
   SPHINCS+ FIPS 205 ADRS layout and a grinding optimization. The account
@@ -27,6 +28,11 @@ An ERC-4337 smart account with two hash-based, post-quantum signers:
 addresses that commit to both the per-chain initial-signer Merkle root and the
 SPHINCS- backup key, so the same address is reachable on every chain.
 
+`SphincsAccount` is the stateless alternative: a single SPHINCS- key signs every
+UserOp, with no rotation, no activation step and no recovery path. Its factory
+binds the key into the CREATE2 salt in the same way. See
+[docs/sphincs-account.md](docs/sphincs-account.md).
+
 ## Contract Layout
 
 ```text
@@ -34,14 +40,18 @@ src/
 +-- SimpleAccount.sol                    ERC-4337 account: FORS+C primary, SPHINCS- backup
 +-- SimpleAccountFactory.sol             CREATE2 clone factory
 +-- InitialSignerCommitment.sol          Salt / activation-leaf / backup-leaf domains
++-- SphincsAccount.sol                   ERC-4337 account: SPHINCS- only signer
++-- SphincsAccountFactory.sol            CREATE2 clone factory for SphincsAccount
 +-- Verifiers/
 |   +-- ForsVerifier.sol                 FORS+C verifier (recover -> owner address)
-|   +-- SphincsVerifier.sol              SPHINCS- verifier (verify -> bool)
+|   +-- SphincsVerifier.sol              SPHINCS- backup verifier (verify -> bool)
+|   +-- SphincsStandardVerifier.sol      Standard SPHINCS- verifier for SphincsAccount
 +-- Interfaces/
     +-- ISignatureVerifier.sol
     +-- ISphincsVerifier.sol
 
-script/Deploy.s.sol                      Deterministic CREATE2 deploy (Foundry)
+script/Deploy.s.sol                      Deterministic CREATE2 deploy of the SimpleAccount family
+script/DeploySphincsAccount.s.sol        Deterministic CREATE2 deploy of the SphincsAccount family
 deploy-4337/                             Same deploy, gas-sponsored through ERC-4337 + Pimlico
 scripts/signing_reference.py             Dependency-free FORS+C reference signer / vector generator
 scripts/sphincs_reference.py             Drives the upstream SPHINCS- signer to mint a test vector
@@ -52,6 +62,7 @@ docs/
 +-- fors-parameters.md                   FORS+C parameter choice and security analysis
 +-- fors-two-forest-cache.md             Signer-side tree cache / reuse notes
 +-- sphincs-backup-recovery.md           SPHINCS- backup signer: dispatch, binding, recovery
++-- sphincs-account.md                   SPHINCS- only account: signature, binding, budget
 +-- multichain-consistent-addresses.md   Root-based first activation across chains
 ```
 
@@ -73,6 +84,10 @@ that they stay so. `userOp.callData` ends with the 20-byte `nextOwner`
 (FORS / activation) or with `currentKey || nextOwner` (SPHINCS-). Multiple
 devices are supported through per-key `authState` and `addSigner()`.
 
+`SphincsAccount` has one signer type and no dispatch: `userOp.signature` is the
+raw 8,400-byte blob and `userOp.callData` is a plain call. Replay protection is
+the EntryPoint nonce.
+
 ## Parameters
 
 Parameters are still in a tuning phase and may change.
@@ -83,10 +98,17 @@ Level 1), q=2 = 104, q=5 = 70. Signer hashes per signature: ~2.4k. Tree cache
 per keypair: ~25 KB. To retune, edit the primary parameters at the top of the
 verifier; all derived constants recompute automatically.
 
-**SPHINCS-** (`src/Verifiers/SphincsVerifier.sol`): n=16, h=22, d=2, a=19, k=7,
-w=8, l=43. Signature 3,688 bytes, budget 2^22 signatures per key. The verifier
-is vendored verbatim from the [SPHINCS-](https://github.com/nconsigny/SPHINCS-)
-reference implementation and is unaudited research code.
+**SPHINCS- backup** (`src/Verifiers/SphincsVerifier.sol`): n=16, h=22, d=2,
+a=19, k=7, w=8, l=43. Signature 3,688 bytes, budget 2^22 signatures per key. The
+verifier is vendored verbatim from the
+[SPHINCS-](https://github.com/nconsigny/SPHINCS-) reference implementation and
+is unaudited research code.
+
+**SPHINCS- standard** (`src/Verifiers/SphincsStandardVerifier.sol`, used by
+`SphincsAccount`): n=16, h=20, d=4, a=7, k=29, w=4, l=68. Standard FORS and
+standard WOTS+ with checksum, no grinding. Signature 8,400 bytes, budget about
+10^6 signatures per key. Derived from the same reference code, unaudited, and
+without a committed reference vector yet.
 
 ## Build And Test
 
@@ -96,7 +118,7 @@ forge build
 forge test
 ```
 
-63 tests across 5 suites. Coverage includes:
+93 tests across 7 suites. Coverage includes:
 
 - Round-trip cryptographic tests for the FORS+C verifier, including a committed
   reference vector produced by `scripts/signing_reference.py`.
@@ -105,6 +127,10 @@ forge test
 - SPHINCS- verifier guard tests. The vector-backed happy-path tests activate
   once `test/vectors/sphincs-reference-0.json` is generated with
   `scripts/sphincs_reference.py` (needs the external SPHINCS- signer).
+- `SphincsAccount` tests: factory key binding, initialization lock, validation
+  with a mock verifier, garbage rejection on the real verifier, execution.
+- Standard SPHINCS- verifier layout, length-disjointness and guard tests. No
+  positive verification is asserted until a reference vector exists.
 
 ## Deploy
 
@@ -117,6 +143,10 @@ targets ERC-4337 EntryPoint v0.7 by default.
 
 `deploy-4337/` performs the same deployment from a Pimlico-sponsored UserOp so
 no native gas is needed. See its README.
+
+`script/DeploySphincsAccount.s.sol` deploys `SphincsStandardVerifier` and
+`SphincsAccountFactory` the same way, without touching the `SimpleAccount`
+family.
 
 ## Legacy Code
 
