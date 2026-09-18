@@ -17,6 +17,7 @@ docs/*
 !docs/signing-spec.md
 !docs/sphincs-backup-recovery.md
 !docs/multichain-consistent-addresses.md
+!docs/sphincs-account.md
 
 images/
 
