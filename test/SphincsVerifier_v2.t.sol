@@ -7,8 +7,8 @@ import {SPHINCS_SIG_LEN} from "../src/Verifiers/SphincsVerifier.sol";
 import {SPHINCS_STANDARD_SIG_LEN} from "../src/Verifiers/SphincsStandardVerifier.sol";
 import {FORS_SIG_LEN} from "../src/Verifiers/ForsVerifier.sol";
 
-/// @dev Layout, guard and reference-vector tests for SphincsVerifier_v2 (standard FORS under
-///      standard WOTS+, n=16 h=20 d=5 a=9 k=19 w=16). The positive vector is minted by
+/// @dev Layout, guard and reference-vector tests for SphincsVerifier_v2 (sphincs-g: standard FORS
+///      under standard WOTS+, n=16 h=20 d=5 a=9 k=19 w=16). The positive vector is minted by
 ///      scripts/sphincs_v2_reference.py into test/vectors/sphincs-v2-reference-0.json.
 contract SphincsVerifier_v2Test is Test {
     SphincsVerifier_v2 verifier;
@@ -33,6 +33,12 @@ contract SphincsVerifier_v2Test is Test {
         uint256 expected = N * (1 + K + K * A) + D * (N * (LEN1 + LEN2) + N * SUBTREE_H);
         assertEq(expected, SPHINCS_V2_SIG_LEN, "layout != constant");
         assertEq(SPHINCS_V2_SIG_LEN, 6176);
+    }
+
+    function test_publicConstants() public view {
+        assertEq(verifier.SIG_LEN(), SPHINCS_V2_SIG_LEN);
+        assertEq(verifier.PARAMETER_SET(), "sphincs-g");
+        assertEq(verifier.HMSG_INPUT_BYTES(), 32 + 3 * N + 32);
     }
 
     function test_hypertreeStartOffset() public pure {

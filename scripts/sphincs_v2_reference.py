@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Reference signer + test-vector generator for src/Verifiers/SphincsVerifier_v2.sol.
 
-Parameter set: n=16 h=20 d=5 h'=4 a=9 k=19 w=16 (log_w=4), l = 32 + 3 = 35, standard FORS under
-standard WOTS+ (no +C grinding on either layer). Signature = 6176 bytes.
+Parameter set (sphincs-g): n=16 h=20 d=5 h'=4 a=9 k=19 w=16 (log_w=4), l = 32 + 3 = 35, standard
+FORS under standard WOTS+ (no +C grinding on either layer). Signature = 6176 bytes.
 
 Mirrors the verifier exactly: keccak256 tweakable hashes over 32-byte slots (seed ‖ ADRS ‖ payload),
-16-byte nodes kept in the top half of each slot, FIPS 205 uncompressed ADRS, the 0xFF..FF H_msg pad,
-and LSB-first digit / FORS-index extraction. Secret-key derivation is signer-private (the verifier
+16-byte nodes kept in the top half of each slot, FIPS 205 uncompressed ADRS, the compact 112-byte
+H_msg (ff32 ‖ R ‖ PK.seed ‖ PK.root ‖ M), FORS signature interleaved per tree (sk ‖ auth path),
+WOTS+ signing the node directly with MSB-first digits and checksum, and LSB-first FORS / hypertree
+indices. Secret-key derivation is signer-private (the verifier
 never sees it); here it is keccak(skSeed ‖ ADRS) so the output is fully deterministic.
 
 This is a TEST signer: it uses fixed seeds and must never be used to hold real funds.
@@ -89,15 +91,16 @@ def wots_pk(layer: int, tree: int, kp: int) -> bytes:
     return thash(adrs(layer, tree, WOTS_PK, kp), *pks)
 
 
-def wots_digits(msg_node: bytes, layer: int, tree: int, kp: int) -> list[int]:
-    dw = int.from_bytes(keccak256(slot(PK_SEED) + adrs(layer, tree, WOTS_HASH, kp) + slot(msg_node)), "big")
-    msg = [(dw >> (LOG_W * i)) & (W - 1) for i in range(LEN1)]
+def wots_digits(msg_node: bytes) -> list[int]:
+    """FIPS 205 base_2b: the node's nibbles MSB-first, then the checksum's LEN2 nibbles MSB-first."""
+    v = int.from_bytes(msg_node, "big")
+    msg = [(v >> (LOG_W * (LEN1 - 1 - i))) & (W - 1) for i in range(LEN1)]
     csum = sum(W - 1 - x for x in msg)
-    return msg + [(csum >> (LOG_W * j)) & (W - 1) for j in range(LEN2)]
+    return msg + [(csum >> (LOG_W * (LEN2 - 1 - j))) & (W - 1) for j in range(LEN2)]
 
 
 def wots_sign(msg_node: bytes, layer: int, tree: int, kp: int) -> list[bytes]:
-    digits = wots_digits(msg_node, layer, tree, kp)
+    digits = wots_digits(msg_node)
     return [chain(wots_sk(layer, tree, kp, i), 0, digits[i], layer, tree, kp, i) for i in range(L)]
 
 
@@ -143,16 +146,16 @@ def keygen() -> tuple[bytes, bytes]:
 
 def sign(message: bytes, pk_root: bytes) -> bytes:
     R = keccak256(slot(SK_PRF) + message)[:N]
-    digest = int.from_bytes(keccak256(slot(PK_SEED) + slot(pk_root) + slot(R) + message + b"\xff" * 32), "big")
+    digest = int.from_bytes(keccak256(b"\xff" * 32 + R + PK_SEED + pk_root + message), "big")
     ht_idx = (digest >> (K * A)) & ((1 << H) - 1)
 
     idx_leaf, idx_tree = ht_idx & ((1 << HP) - 1), ht_idx >> HP
-    secrets, auths, roots = [], [], []
+    fors, roots = [], []
     for i in range(K):
         t = (digest >> (i * A)) & ((1 << A) - 1)
         sks, levels = fors_tree(i, idx_tree, idx_leaf)
-        secrets.append(sks[t])
-        auths.extend(auth_path(levels, t))
+        fors.append(sks[t])
+        fors.extend(auth_path(levels, t))
         roots.append(levels[A][0])
     node = thash(adrs(0, idx_tree, FORS_ROOTS, idx_leaf), *roots)
 
@@ -166,7 +169,7 @@ def sign(message: bytes, pk_root: bytes) -> bytes:
         node = levels[HP][0]
     assert node == pk_root, "hypertree did not reach pkRoot"
 
-    sig = R + b"".join(secrets) + b"".join(auths) + b"".join(ht)
+    sig = R + b"".join(fors) + b"".join(ht)
     assert len(sig) == SIG_LEN
     return sig
 
