@@ -1,0 +1,109 @@
+{
+  "network": {
+    "name": "Daisugi Testnet",
+    "chainId": 1337,
+    "rpc": "https://daisugi.fyi/rpc",
+    "bundler": "https://daisugi.fyi/bundler",
+    "entryPoint": "0x433709009B8330FDa32311DF1C2AFA402eD8D009",
+    "create2Deployer": "0x4e59b44847b379578588920cA78FbF26c0B4956C"
+  },
+  "deployedAt": "2026-11-12",
+  "source": {
+    "repository": "RivaLabs-Core/Post-Quantum-AA-Infra",
+    "commit": "a6e779f",
+    "compiler": {
+      "solc": "0.8.30+commit.73712a01",
+      "viaIR": true,
+      "optimizerRuns": 200,
+      "evmVersion": "osaka"
+    },
+    "libraries": {
+      "account-abstraction": "v0.8.0",
+      "openzeppelin-contracts": "v5.1.0",
+      "lib/kernel (solady)": "03f7f5c (solady 9deb9ed)"
+    }
+  },
+  "method": "EIP-8141 frame transactions (type 0x06) from an ECDSA EOA, one per contract, each calling the CREATE2 deployer with salt || initCode; see scripts/daisugi_frame_tx.py",
+  "deployer": "0x1b442f64BA100d84BB7Ce577463F298f2F32b58f",
+  "contracts": [
+    {
+      "contract": "SphincsVerifier_v6",
+      "address": "0xc69bff3F9AB6ad6db6aabA48D1a31BA23d5380ba",
+      "salt": "0xfab9fa8e33cc7b841546ab96caa21c07e27b090adb2737ada6cd6aa53b57ef66",
+      "saltPreimage": "NiceTry.SphincsVerifier_v6.h24-7.7.10-w4-k19a9.v1",
+      "initCodeHash": "0x990654c28de9036b9af05b85c81069646c3c010ed50bdf836486fd5e78d7e116",
+      "runtimeCodeHash": "0x0e5b7e0c519a0dd5883f710878837ed55141af87fb5a2305dea8931fab84a6af",
+      "transactionHash": "0xd826a06c491c0f9b1eb445c5d359b157245d713158770b25a91e9646ef192332",
+      "blockNumber": 2631784,
+      "gasUsed": 4448034,
+      "parameterSet": "sphincs-wotsc-h24-7.7.10-w4-k19a9",
+      "sigLen": 6524
+    },
+    {
+      "contract": "SphincsAccountFactory_v6",
+      "address": "0x57F412e0F6B5A20c5E8614061D1432ea0C44C0a8",
+      "salt": "0xffc24d06e1aabcc564e041aee8ada85468153a5ff99433345eca34fdcda46b20",
+      "saltPreimage": "NiceTry.SphincsAccountFactory_v6.v1",
+      "initCodeHash": "0xa55d9df9ce4169228deaf499e4be4a9376b9c0e3100d92d4dee2bbf143f89b51",
+      "runtimeCodeHash": "0x03d255f2e11bd6d6555ef19c94fa8c736f64c404079fcbf21ed212bc36bc47ef",
+      "transactionHash": "0xb0a11def14b73c4c36c47a4ef946079e6db5eb0cb76eb556c5838305874e00cd",
+      "blockNumber": 2631786,
+      "gasUsed": 1338530,
+      "constructorArgs": {
+        "entryPoint": "0x433709009B8330FDa32311DF1C2AFA402eD8D009",
+        "verifier": "0xc69bff3F9AB6ad6db6aabA48D1a31BA23d5380ba"
+      },
+      "sigLen": 6524
+    },
+    {
+      "contract": "SphincsVerifier_v5",
+      "address": "0x1E5e327ce6943E5c0D8130B7eEf387f72148F8D8",
+      "salt": "0xfc2e596f4e76dfe2c9f784dda940f7f075d023848b599656bf6dd1e01e6ad68c",
+      "saltPreimage": "NiceTry.SphincsVerifier_v5.h26-8.8.10-w4-k24a10.v1",
+      "initCodeHash": "0x6670c7e92764e0a5a9744a497bf7791be62762804f8c70d7d93b568ebdee1b44",
+      "runtimeCodeHash": "0xaade43cfcc0ae6b715f7f8d450fc116a34e17f6185abb6795747d9371af8542f",
+      "transactionHash": "0x84dda7cf48afe5c5fa746dfb6faa77f93f0d5c64f3229e3f284dc3f95cb6f436",
+      "blockNumber": 2631793,
+      "gasUsed": 5144293,
+      "parameterSet": "sphincs-wotsc-h26-8.8.10-w4-k24a10",
+      "sigLen": 7740
+    },
+    {
+      "contract": "SphincsAccountFactory_v5",
+      "address": "0x07CD78752403C6fC913796817c0B7c5EDA902088",
+      "salt": "0xf79541028198a57dfe4efc90303506e990beaaa727c88ff0f16d75e561e6ce86",
+      "saltPreimage": "NiceTry.SphincsAccountFactory_v5.v1",
+      "initCodeHash": "0xa26dd2ca32197573ed551002d9fcbc20631f418d214af764b764f7226619fb74",
+      "runtimeCodeHash": "0xdcf10bec771cb72046416d1df696d130d32c447e58234f1716fdf29b172f0eba",
+      "transactionHash": "0xcbac4d9137307560024dce0b26428b7b583f137e067c0a45f25014d8b127d378",
+      "blockNumber": 2631794,
+      "gasUsed": 1338518,
+      "constructorArgs": {
+        "entryPoint": "0x433709009B8330FDa32311DF1C2AFA402eD8D009",
+        "verifier": "0x1E5e327ce6943E5c0D8130B7eEf387f72148F8D8"
+      },
+      "sigLen": 7740
+    }
+  ],
+  "accountImplementations": [
+    {
+      "contract": "SphincsAccount_v6",
+      "address": "0x50e34381F0F65c15702c5b338f04F93E074831CD",
+      "deployedBy": "0x57F412e0F6B5A20c5E8614061D1432ea0C44C0a8",
+      "transactionHash": "0xb0a11def14b73c4c36c47a4ef946079e6db5eb0cb76eb556c5838305874e00cd",
+      "runtimeCodeHash": "0x7841431ae68cbc4061ea08246be98991327699db2fb8e7fcbd9a809d82de8632"
+    },
+    {
+      "contract": "SphincsAccount_v5",
+      "address": "0xbCe9658299A0A917b10df399A12aEBE1d45B9d18",
+      "deployedBy": "0x07CD78752403C6fC913796817c0B7c5EDA902088",
+      "transactionHash": "0xcbac4d9137307560024dce0b26428b7b583f137e067c0a45f25014d8b127d378",
+      "runtimeCodeHash": "0x6562a341ddb49d1aa569685bf26dbc13a11731c6a348c9edddf2d2ce656dbe8a"
+    }
+  ],
+  "notes": [
+    "Verifier runtime code matches a local build of the source commit byte for byte.",
+    "Both test vectors per verifier (test/vectors/sphincs-v{5,6}-bench-{0,1}.json) verify on-chain via eth_call and fail with a changed message.",
+    "Daisugi's bundler rejects UserOps whose validation pays the prefund with a value-carrying CALL; give an account an EntryPoint deposit (depositTo) before sending UserOps from it."
+  ]
+}

@@ -73,6 +73,8 @@ deploy-4337/                             Same deploy, gas-sponsored through ERC-
 scripts/signing_reference.py             Dependency-free FORS+C reference signer / vector generator
 scripts/sphincs_reference.py             Drives the upstream SPHINCS- signer to mint a test vector
 scripts/sphincs_wotsc_reference.py       Reference signer / vector generator for SphincsVerifier_v5 / v6
+scripts/daisugi_frame_tx.py              EIP-8141 frame-transaction sender for the Daisugi testnet
+deployments/daisugi.json                 Daisugi addresses of the v5 / v6 families
 test/vectors/fors-reference-0.json       FORS+C reference vector checked by ForsReferenceVector.t.sol
 
 docs/
@@ -186,6 +188,15 @@ family.
 `SphincsAccountFactory_v5` and `SphincsVerifier_v6` + `SphincsAccountFactory_v6`
 the same way, and checks that each verifier, factory and implementation agree on
 the signature length.
+
+On the Daisugi testnet (chain 1337), whose RPC accepts only EIP-8141 frame
+transactions (type 0x06), the v5 and v6 families are deployed at the same
+CREATE2 salts with `scripts/daisugi_frame_tx.py deploy`, which sends one frame
+transaction per contract from a plain ECDSA EOA. Addresses, transactions and
+build settings are in `deployments/daisugi.json`. Daisugi's bundler rejects a
+UserOp whose validation pays the prefund with a value transfer, so give an
+account an EntryPoint deposit (`daisugi_frame_tx.py call` to `depositTo`) before
+sending UserOps from it.
 
 ## Legacy Code
 
