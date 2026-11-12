@@ -3,7 +3,8 @@ pragma solidity ^0.8.28;
 
 /// @dev Signature length of the SphincsVerifier_v6 blob (no prefix). MUST equal `SIG_LEN` and the
 ///      length check in `SphincsVerifier_v6.verify` (6524). Distinct from `SPHINCS_SIG_LEN` (3688),
-///      `SPHINCS_V2_SIG_LEN` (6176), `SPHINCS_STANDARD_SIG_LEN` (8400) and `FORS_SIG_LEN` (2448).
+///      `SPHINCS_V2_SIG_LEN` (6176), `SPHINCS_V5_SIG_LEN` (7740), `SPHINCS_STANDARD_SIG_LEN` (8400)
+///      and `FORS_SIG_LEN` (2448).
 uint256 constant SPHINCS_V6_SIG_LEN = 6524;
 
 /// @title SphincsVerifier_v6 — experimental SPHINCS- verifier, standard FORS under WOTS+C (w=4), compact hash
