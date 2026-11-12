@@ -7,13 +7,15 @@ Reference Solidity implementation of the NiceTry ephemeral-key smart wallet desi
 
 ## What This Repo Contains
 
-Two ERC-4337 smart account families built on hash-based, post-quantum signatures:
+ERC-4337 smart account families built on hash-based, post-quantum signatures:
 
 | Account | Signer | Scheme | Signature | Verify gas |
 | --- | --- | --- | ---: | ---: |
 | `SimpleAccount` | Primary (every UserOp) | FORS+C | 2,448 B | ~35k |
 | `SimpleAccount` | Backup / recovery / bootstrap | SPHINCS- | 3,688 B | ~105k |
 | `SphincsAccount` | Only signer | SPHINCS- (standard FORS + WOTS+) | 8,400 B | ~268k |
+| `SphincsAccount_v5` | Only signer | SPHINCS- (standard FORS + WOTS+C), h=26 | 7,740 B | ~81k |
+| `SphincsAccount_v6` | Only signer | SPHINCS- (standard FORS + WOTS+C), h=24 | 6,524 B | ~70k |
 
 - **FORS+C** is a Forest of Random Subsets few-time signature using the
   SPHINCS+ FIPS 205 ADRS layout and a grinding optimization. The account
@@ -33,6 +35,12 @@ UserOp, with no rotation, no activation step and no recovery path. Its factory
 binds the key into the CREATE2 salt in the same way. See
 [docs/sphincs-account.md](docs/sphincs-account.md).
 
+`SphincsAccount_v5` and `SphincsAccount_v6` are the same stateless model on
+the WOTS+C verifiers `SphincsVerifier_v5` / `SphincsVerifier_v6`. They share
+`SphincsWotscAccount` / `SphincsWotscAccountFactory`; each version pins its
+verifier's signature length and has its own factory, implementation and
+address family. The standard `SphincsAccount` family is untouched.
+
 ## Contract Layout
 
 ```text
@@ -42,19 +50,29 @@ src/
 +-- InitialSignerCommitment.sol          Salt / activation-leaf / backup-leaf domains
 +-- SphincsAccount.sol                   ERC-4337 account: SPHINCS- only signer
 +-- SphincsAccountFactory.sol            CREATE2 clone factory for SphincsAccount
++-- SphincsWotscAccount.sol              Shared account logic for the WOTS+C SPHINCS- accounts
++-- SphincsWotscAccountFactory.sol       Shared CREATE2 clone factory logic for them
++-- SphincsAccount_v5.sol                Account for SphincsVerifier_v5 (7,740-byte signature)
++-- SphincsAccountFactory_v5.sol         Factory for SphincsAccount_v5
++-- SphincsAccount_v6.sol                Account for SphincsVerifier_v6 (6,524-byte signature)
++-- SphincsAccountFactory_v6.sol         Factory for SphincsAccount_v6
 +-- Verifiers/
 |   +-- ForsVerifier.sol                 FORS+C verifier (recover -> owner address)
 |   +-- SphincsVerifier.sol              SPHINCS- backup verifier (verify -> bool)
 |   +-- SphincsStandardVerifier.sol      Standard SPHINCS- verifier for SphincsAccount
+|   +-- SphincsVerifier_v5.sol           WOTS+C SPHINCS- verifier, h=26 (10-8-8), k=24 a=10
+|   +-- SphincsVerifier_v6.sol           WOTS+C SPHINCS- verifier, h=24 (10-7-7), k=19 a=9
 +-- Interfaces/
     +-- ISignatureVerifier.sol
     +-- ISphincsVerifier.sol
 
 script/Deploy.s.sol                      Deterministic CREATE2 deploy of the SimpleAccount family
 script/DeploySphincsAccount.s.sol        Deterministic CREATE2 deploy of the SphincsAccount family
+script/DeploySphincsWotscAccounts.s.sol  Deterministic CREATE2 deploy of the v5 and v6 families
 deploy-4337/                             Same deploy, gas-sponsored through ERC-4337 + Pimlico
 scripts/signing_reference.py             Dependency-free FORS+C reference signer / vector generator
 scripts/sphincs_reference.py             Drives the upstream SPHINCS- signer to mint a test vector
+scripts/sphincs_wotsc_reference.py       Reference signer / vector generator for SphincsVerifier_v5 / v6
 test/vectors/fors-reference-0.json       FORS+C reference vector checked by ForsReferenceVector.t.sol
 
 docs/
@@ -86,7 +104,9 @@ devices are supported through per-key `authState` and `addSigner()`.
 
 `SphincsAccount` has one signer type and no dispatch: `userOp.signature` is the
 raw 8,400-byte blob and `userOp.callData` is a plain call. Replay protection is
-the EntryPoint nonce.
+the EntryPoint nonce. `SphincsAccount_v5` and `SphincsAccount_v6` work the same
+way with 7,740- and 6,524-byte blobs; any other length fails validation without
+reverting.
 
 ## Parameters
 
@@ -110,6 +130,15 @@ standard WOTS+ with checksum, no grinding. Signature 8,400 bytes, budget about
 10^6 signatures per key. Derived from the same reference code, unaudited, and
 without a committed reference vector yet.
 
+**SPHINCS- WOTS+C** (`src/Verifiers/SphincsVerifier_v5.sol` and
+`SphincsVerifier_v6.sol`, used by `SphincsAccount_v5` / `_v6`): n=16, d=3,
+w=4, standard FORS under WOTS+C (no checksum chains, digit sum fixed at 120 by
+a grinding counter), compact keccak256 tweakable hash. v5: h=26 with subtrees
+10-8-8 from the top, k=24 a=10, 7,740 bytes, budget about 2^30 signatures per
+key. v6: h=24 with subtrees 10-7-7 from the top, k=19 a=9, 6,524 bytes, budget
+about 2^24 signatures per key. The top subtree is fixed per key, so a signer can
+cache it. Unaudited; checked against vectors from an off-repo signer.
+
 ## Build And Test
 
 ```bash
@@ -118,7 +147,7 @@ forge build
 forge test
 ```
 
-93 tests across 7 suites. Coverage includes:
+185 tests across 14 suites. Coverage includes:
 
 - Round-trip cryptographic tests for the FORS+C verifier, including a committed
   reference vector produced by `scripts/signing_reference.py`.
@@ -131,6 +160,11 @@ forge test
   with a mock verifier, garbage rejection on the real verifier, execution.
 - Standard SPHINCS- verifier layout, length-disjointness and guard tests. No
   positive verification is asserted until a reference vector exists.
+- `SphincsVerifier_v5` / `_v6`: layout and guard tests, plus bench suites that
+  verify two signer vectors each, reject tampering and report gas.
+- `SphincsAccount_v5` / `_v6` tests: the same account checks as
+  `SphincsAccount`, plus a real-vector UserOp validating end to end and every
+  other family's length failing cleanly.
 
 ## Deploy
 
@@ -147,6 +181,11 @@ no native gas is needed. See its README.
 `script/DeploySphincsAccount.s.sol` deploys `SphincsStandardVerifier` and
 `SphincsAccountFactory` the same way, without touching the `SimpleAccount`
 family.
+
+`script/DeploySphincsWotscAccounts.s.sol` deploys `SphincsVerifier_v5` +
+`SphincsAccountFactory_v5` and `SphincsVerifier_v6` + `SphincsAccountFactory_v6`
+the same way, and checks that each verifier, factory and implementation agree on
+the signature length.
 
 ## Legacy Code
 

@@ -10,6 +10,9 @@ signatures that recover the same owner address in:
 - `src/Verifiers/ForsVerifier.sol`
 - `src/SimpleAccount.sol`
 
+Section 7 specifies the stateless SPHINCS- WOTS+C format verified by
+`src/Verifiers/SphincsVerifier_v5.sol` and `SphincsVerifier_v6.sol`.
+
 ECDSA is included only for account-level binding rules. The active
 post-quantum signature format is FORS+C. The WOTS+C section is kept for
 signers that still implement it; the WOTS+C contracts themselves
@@ -744,3 +747,150 @@ assertEq(verifier.wrecover(signature, digest), expectedAddress);
 ```
 
 and should include mutation tests across every field and boundary.
+
+## 7. SPHINCS- WOTS+C (v5 / v6)
+
+Stateless SPHINCS- for `SphincsAccount_v5` / `SphincsAccount_v6`, verified by
+`src/Verifiers/SphincsVerifier_v5.sol` / `SphincsVerifier_v6.sol`. Standard
+FORS under WOTS+C, with a compact tweakable hash. This format is specific to
+these verifiers: it is neither FIPS 205 nor the 32-byte-slot sphincs-g layout
+used by `SphincsVerifier_v2`. The reference signer is
+`scripts/sphincs_wotsc_reference.py`.
+
+### 7.1 Parameters
+
+```text
+                     v5                          v6
+n                    16                          16
+h                    26                          24
+d                    3                           3
+h' (bottom -> top)   8, 8, 10                    7, 7, 10
+FORS k, a            24, 10                      19, 9
+WOTS w, len          4, 64                       4, 64
+TARGET_SUM           120                         120
+signature            7740 bytes                  6524 bytes
+```
+
+Layer 0 is the bottom subtree (it signs the FORS root); layer 2 is the top
+subtree, whose root is `PK.root`. The top subtree is the same for every
+signature, so a signer can build it once and cache it.
+
+### 7.2 Public Key
+
+```text
+PK.seed, PK.root : 16 bytes each
+```
+
+On-chain both are passed as `bytes32` with the 16 bytes in the top half and
+the low 16 bytes zero. The verifier, the account and the factory reject any
+other encoding.
+
+### 7.3 Tweakable Hash And ADRS
+
+```text
+T(PK.seed, ADRS, v_1..v_m) = left16(keccak256(PK.seed[16] || ADRS[16] || v_1[16] || ... || v_m[16]))
+```
+
+`ADRS` is 16 bytes, big-endian:
+
+```text
+offset  length  field
+0       1       layer
+1       8       tree address
+9       1       type: 0 WOTS_HASH, 1 WOTS_PK, 2 TREE, 3 FORS_TREE, 4 FORS_ROOTS
+10      2       key pair address (0 for TREE)
+12      1       word2: chain index (WOTS_HASH) / tree height (TREE, FORS_TREE)
+13      3       word3: hash index (WOTS_HASH) / tree index (TREE, FORS_TREE)
+```
+
+Unused fields are zero. FORS tree indices fold the k trees into one index
+space: at height `z` of tree `i`, `tree_index = (i << (a - z)) | j`.
+
+Secret values (WOTS chain starts, FORS leaf secrets, `R`) are signer-private
+and never checked on-chain. The reference signer derives them as
+`left16(keccak256(SK.seed || ADRS))` (with `chain = hash = 0` / `height = 0`)
+and `R = left16(keccak256(SK.seed || M))`.
+
+### 7.4 Message Digest And Indices
+
+```text
+digest = keccak256(0xff * 32 || R[16] || PK.seed[16] || PK.root[16] || M[32])   // 112 bytes
+idx_i  = (uint256(digest) >> (a * i)) & (2^a - 1)                              // i = 0..k-1
+
+v5: htIdx = uint256(keccak256(digest)) & (2^26 - 1)      // k*a + h = 266 > 256
+v6: htIdx = (uint256(digest) >> 171) & (2^24 - 1)
+```
+
+`M` is the 32-byte `userOpHash`. The bottom layer uses
+`leaf_0 = htIdx & (2^h'_0 - 1)` and `tree_0 = htIdx >> h'_0`; each layer above
+takes its leaf index from the low `h'_L` bits of the previous tree address and
+shifts them out. The top layer's tree address is 0.
+
+### 7.5 FORS
+
+For each tree `i`, with `ADRS = (layer 0, tree_0, FORS_TREE, kp = leaf_0, ...)`:
+
+```text
+leaf_j        = T(PK.seed, ADRS(height 0, index (i << a) | j), sk_j)
+node(z, y)    = T(PK.seed, ADRS(height z, index (i << (a - z)) | y), left, right)
+root_i        = node(a, i)
+fors_pk       = T(PK.seed, (layer 0, tree_0, FORS_ROOTS, kp = leaf_0), root_0 || ... || root_{k-1})
+```
+
+The signature for tree `i` is `sk_{idx_i}` followed by its `a` auth-path
+nodes, bottom up.
+
+### 7.6 WOTS+C
+
+For layer `L` signing the 16-byte node `x` (the FORS public key at layer 0,
+the previous subtree root above it), with `kp` = this layer's leaf index:
+
+```text
+d      = keccak256(PK.seed || ADRS(L, tree, WOTS_HASH, kp, 0, 0) || x[16] || count[4])
+digits = 64 base-4 digits of the top 128 bits of d, most significant first
+```
+
+The signer increments the 4-byte big-endian `count` from 0 until
+`sum(digits) == 120`. Chain `j` steps are
+
+```text
+c_{s+1} = T(PK.seed, ADRS(L, tree, WOTS_HASH, kp, j, s), c_s)
+```
+
+and the signature carries `c_{digits[j]}` for each chain. The verifier walks
+each chain from `digits[j]` to 3 (72 hashes per layer) and compresses the ends:
+
+```text
+wots_pk = T(PK.seed, ADRS(L, tree, WOTS_PK, kp), end_0 || ... || end_63)
+```
+
+The subtree leaf is `wots_pk`; inner nodes are
+`T(PK.seed, ADRS(L, tree, TREE, 0, z, y), left, right)`.
+
+### 7.7 Signature Layout
+
+```text
+R                                            16
+k x [ FORS sk (16) || auth path (a * 16) ]   k * 16 * (1 + a)
+for L = 0..2 (bottom first):
+    64 chain values                          1024
+    count (uint32, big-endian)               4
+    subtree auth path (h'_L * 16)            16 * h'_L
+
+v5: 16 + 24*176 + 2*(1028 + 128) + (1028 + 160) = 7740
+v6: 16 + 19*160 + 2*(1028 + 112) + (1028 + 160) = 6524
+```
+
+`userOp.signature` is this blob with no prefix, and the account signs
+`userOpHash` directly. The verifier returns true iff the recomputed top root
+equals `PK.root`.
+
+### 7.8 Test Vectors
+
+`test/vectors/sphincs-v5-bench-{0,1}.json` and
+`sphincs-v6-bench-{0,1}.json` come from the reference signer with fixed test
+seeds. Regenerate or check them with:
+
+```text
+python3 scripts/sphincs_wotsc_reference.py v6 --check test/vectors/sphincs-v6-bench-0.json
+```
