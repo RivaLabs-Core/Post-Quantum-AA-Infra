@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
 import {SphincsVerifier_v6, SPHINCS_V6_SIG_LEN} from "../src/Verifiers/SphincsVerifier_v6.sol";
+import {SPHINCS_V5_SIG_LEN} from "../src/Verifiers/SphincsVerifier_v5.sol";
 import {SPHINCS_V2_SIG_LEN} from "../src/Verifiers/SphincsVerifier_v2.sol";
 import {SPHINCS_SIG_LEN} from "../src/Verifiers/SphincsVerifier.sol";
 import {SPHINCS_STANDARD_SIG_LEN} from "../src/Verifiers/SphincsStandardVerifier.sol";
@@ -66,6 +67,7 @@ contract SphincsVerifier_v6Test is Test {
         assertTrue(SPHINCS_V6_SIG_LEN != FORS_SIG_LEN);
         assertTrue(SPHINCS_V6_SIG_LEN != SPHINCS_SIG_LEN);
         assertTrue(SPHINCS_V6_SIG_LEN != SPHINCS_V2_SIG_LEN);
+        assertTrue(SPHINCS_V6_SIG_LEN != SPHINCS_V5_SIG_LEN);
         assertTrue(SPHINCS_V6_SIG_LEN != SPHINCS_STANDARD_SIG_LEN);
         uint256 minEnvelope = 3 + FORS_SIG_LEN;
         assertTrue(
@@ -88,6 +90,10 @@ contract SphincsVerifier_v6Test is Test {
         bytes memory b = new bytes(SPHINCS_V2_SIG_LEN);
         vm.expectRevert("Invalid sig length");
         verifier.verify(bytes32(0), bytes32(0), bytes32(0), b);
+
+        bytes memory f = new bytes(SPHINCS_V5_SIG_LEN);
+        vm.expectRevert("Invalid sig length");
+        verifier.verify(bytes32(0), bytes32(0), bytes32(0), f);
 
         bytes memory e = new bytes(SPHINCS_STANDARD_SIG_LEN);
         vm.expectRevert("Invalid sig length");
